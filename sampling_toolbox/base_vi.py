@@ -8,26 +8,19 @@ class VI(ABC):
     ''' 
     base class for Variational inference sampling algorithms 
     '''
-    def __init__(self, log_likelihood, grad_log_likelihood, log_prior, grad_log_prior, step_size=0.1, rng=None):
-        self.log_likelihood = log_likelihood
-        self.grad_log_likelihood = grad_log_likelihood
-        self.log_prior = log_prior
-        self.grad_log_prior = grad_log_prior
+    def __init__(self, log_and_grad_post, step_size=0.1, rng=None):
+        self.log_and_grad_post = log_and_grad_post
         self.step_size = step_size
         self.grad_calls = 0
         self.log_calls = 0
         self.rng = rng or np.random.default_rng()
 
-
-    def grad_log_posterior(self, x):
-        ''' gradient of the log posterior distribution '''
-        self.grad_calls += 1
-        return self.grad_log_likelihood(x) + self.grad_log_prior(x)
     
-    def log_posterior(self, x):
-        ''' log posterior distribution '''
+    def log_and_grad_posterior(self, x):
+        ''' returns log and grad of posterior pdf as a tuple (log,grad) '''
         self.log_calls += 1
-        return self.log_likelihood(x) + self.log_prior(x)
+        self.grad_calls += 1
+        return self.log_and_grad_post(x)
 
     @abstractmethod
     def _sample(self, x0, num_samples):

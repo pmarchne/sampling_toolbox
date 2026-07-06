@@ -4,7 +4,7 @@ from sampling_toolbox.svgd import SVGD
 from sampling_toolbox.langevin import ULA
 from sampling_toolbox.aldi import ALDI
 from plotting import plot_result, plot_kl
-from benchmarks_2D import rosenbrock2d_log, rosenbrock2d_grad_log, rosenbrock2d_hessian_gn_log, rosenbrock2d_div_Q, rosenbrock2d_div_Q_gn_fast
+from benchmarks_2D import rosenbrock2d_log, rosenbrock2d_grad_log
 
 def log_prior(x):
     return 0.0
@@ -18,13 +18,6 @@ def f(x):
 def df(x):
     return rosenbrock2d_grad_log(x, alpha=0.5)
 
-def df_hessian_preconditioned(x):
-    # Compute base gradient
-    base_grad = rosenbrock2d_grad_log(x, alpha=0.5)
-    # Compute Hessian matrix at current point
-    hess = rosenbrock2d_hessian_gn_log(x)
-    hess_inv = np.linalg.inv(-hess)
-    return hess_inv @ base_grad
     
 def initialize():
     # Setup the target
@@ -53,34 +46,9 @@ def run_svgd(particles, dt, nsteps, rng):
     print("svgd finished")
     return s_history, kl_hist
 
-def dynamic_preconditioner(x):
-    hess = rosenbrock2d_hessian_gn_log(x)
-    return -np.linalg.inv(hess)
 
-def run_langevin(particles, dt, nsteps, rng, precond=True):
-    x_map = np.array([1., 1.])
-    hess = rosenbrock2d_hessian_gn_log(x_map)
-    hess_inv = -np.linalg.inv(hess)
-    # print(hess_inv)
-    # hess_inv = np.eye(2)
-    #print("hessian inverse at map", hess_inv)
-    if precond == 'gn': 
-        ula = ULA(log_likelihood=f, log_prior=log_prior,
-                grad_log_likelihood=df, grad_log_prior=grad_log_prior,
-                step_size=dt, n_iter=nsteps, rng=rng, preconditioner=dynamic_preconditioner, div_preconditioner=rosenbrock2d_div_Q_gn_fast
-            )
-    elif precond == 'numeric_fd':
-        ula = ULA(log_likelihood=f, log_prior=log_prior,
-                grad_log_likelihood=df, grad_log_prior=grad_log_prior,
-                step_size=dt, n_iter=nsteps, rng=rng, preconditioner='numerical', div_preconditioner='numerical'
-            )
-    elif precond == 'map':
-        ula = ULA(log_likelihood=f, log_prior=log_prior,
-                grad_log_likelihood=df, grad_log_prior=grad_log_prior,
-                step_size=dt, n_iter=nsteps, rng=rng, preconditioner=hess_inv
-            )
-    else:
-        ula = ULA(log_likelihood=f, log_prior=log_prior,
+def run_langevin(particles, dt, nsteps, rng):
+    ula = ULA(log_likelihood=f, log_prior=log_prior,
                 grad_log_likelihood=df, grad_log_prior=grad_log_prior,
                 step_size=dt, n_iter=nsteps, rng=rng
             )
@@ -91,38 +59,32 @@ def run_langevin(particles, dt, nsteps, rng, precond=True):
     print("ula finished")
     return s_history, kl_hist
 
+
 def run_aldi(particles, dt, nsteps, rng):
     aldi = ALDI(log_likelihood=f, log_prior=log_prior,
                 grad_log_likelihood=df, grad_log_prior=grad_log_prior,
                 step_size=dt, n_iter=nsteps, rng=rng)
     print("\nRunning ALDI...")
-    s_aldi, s_history, kl_hist = aldi.sample(particles, num_samples=0)
+    s_aldi, s_history = aldi.sample(particles, num_samples=0)
     aldi.report_calls()
     aldi.print_statistics(s_aldi)
     print("aldi finished")
-    return s_history, kl_hist
+    return s_history
 
 if __name__ == "__main__":
     init_particles, rng = initialize()
 
-    #samples_history_svgd, kl_svgd = run_svgd(init_particles, dt=0.1, nsteps=200, rng=rng)
-    samples_history_ula_gn,  kl_ula_gn  = run_langevin(init_particles, dt=0.005, nsteps=15000, rng=rng, precond='gn')
-    #samples_history_ula_num,  kl_ula_num  = run_langevin(init_particles, dt=0.0001, nsteps=500, rng=rng, precond='numeric_fd')
-    samples_history_ula_map,  kl_ula_map  = run_langevin(init_particles, dt=0.005, nsteps=15000, rng=rng, precond='map')
-    samples_history_ula,  kl_ula  = run_langevin(init_particles, dt=0.005, nsteps=15000, rng=rng, precond=False)
+    samples_history_svgd, kl_svgd = run_svgd(init_particles, dt=0.1, nsteps=1000, rng=rng)
+    samples_history_aldi  = run_aldi(init_particles, dt=0.005, nsteps=2000, rng=rng)
+    samples_history_ula,  kl_ula  = run_langevin(init_particles, dt=0.005, nsteps=2000, rng=rng)
     # Store everything in dictionaries
     results = {
-        #'svgd': samples_history_svgd[-1],
-        'ula_gn':  samples_history_ula_gn[-1],
-        #'ula_num':  samples_history_ula_num[-1],
-        'ula_map':  samples_history_ula_map[-1],
+        'svgd': samples_history_svgd[-1],
+        'aldi':  samples_history_aldi[-1],
         'ula':  samples_history_ula[-1]
     }
     kl_tracks = {
-        #'svgd': kl_svgd,
-        'ula_gn':  kl_ula_gn,
-        #'ula_num':  kl_ula_num,
-        'ula_map':  kl_ula_map,
+        'svgd': kl_svgd,
         'ula':  kl_ula,
     }
 
@@ -143,7 +105,7 @@ if __name__ == "__main__":
 
     print(f"Computed Normalizing Constant log(Z): {log_Z:.6f}")
 
-    for method_name in ['ula_gn', 'ula_map', 'ula']:
+    for method_name in ['svgd', 'ula', 'aldi']:
         # Extract the final step's particles dynamically
         final_samples = results[method_name]
         plot_result(
@@ -156,9 +118,7 @@ if __name__ == "__main__":
 
     import matplotlib.pyplot as plt
     plt.figure()
-    plt.plot(kl_ula_gn, label='gn')
-    #plt.plot(kl_ula_num, label='num')
-    plt.plot(kl_ula_map, label='map')
+    plt.plot(kl_svgd, label='svgd')
     plt.plot(kl_ula, label='ula')
     plt.xlabel('Iteration')
     plt.ylabel('KL')

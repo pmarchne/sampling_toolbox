@@ -1,247 +1,300 @@
 import numpy as np
-from scipy.linalg import solve_triangular
 from scipy.special import logsumexp
 from sampling_toolbox.base_vi import VI
-from sampling_toolbox.utilities.gauss_vi_tools import compute_increments, compute_weight_increments
-from sampling_toolbox.utilities.time_integration import adam_step_pos, euler_step_pos, rk4_step_pos, init_states, euler_step_w, adam_step_w, rk4_step_w, heun_adaptive_step_pos, heun_step_w
+from sampling_toolbox.utilities.gauss_vi_tools import compute_increments_generic, compute_weight_increments, compute_Es_cached
+from sampling_toolbox.utilities.time_integration import (
+    euler_step_pos, euler_step_w, heun_adaptive_step_pos, heun_adaptive_step_pos2
+)
+from sampling_toolbox.utilities.stopping_criteria import VariationalEarlyStopping
 from sampling_toolbox.utilities.kl_tracker import GenericKLTracker
-# 1) unify gaussian expectations : midpoint, cubature or MC
-# l-bfgs precond option
-# 2) FR weight in log-space + Strang splitting
-# 3) Time integration : adam or rk4 or Euler
-# test on Rosenbrock
-# output : 1D wasserstein distance + KL divergence
+from sampling_toolbox.utilities.gauss_vi_tools import mixture_grad
+
 
 class GaussianODE(VI):
-    '''
-    Implements Gaussian variational inference using ODE formulation
-    for mean and Cholesky factor R of the covariance (Sigma = R @ R.T).
-    Hessian-free: only requires gradients of log-likelihood and log-prior.
-    Cubature rule approximates expectations.
-    '''
     def __init__(self,
-                 log_likelihood,
-                 grad_log_likelihood,
-                 log_prior,
-                 grad_log_prior,
+                 log_and_grad_post,
                  step_size: float = 0.1,
                  n_iter = 50,
-                 num_samples = 1,
-                 method = 'cubature',
                  time_scheme = 'euler',
+                 time_scheme_fr = 'euler',
+                 precond = 'none',
                  step_size_w: float = 0.,
+                 ess_target = None,
                  rng = None):
-        super().__init__(log_likelihood, grad_log_likelihood, log_prior, grad_log_prior, step_size, rng=rng)
+        super().__init__(log_and_grad_post, step_size, rng=rng)
         self.n_iter = n_iter
         self.time_scheme = time_scheme
-        self.method = method
-        self.ns = num_samples
+        self.time_scheme_fr = time_scheme_fr
+        self.max_rejections = 5000
+        self.precond = precond
         self.step_size_w = step_size_w
-        self.ll = 1.0 #0.2 # damping parameter 0.3
+        self.cumulative_dist = 0.0
         self.kl_track = GenericKLTracker(0.)
-        # Trackers for analysis
+        self.ess_target = ess_target
+        
+        # Diagnostics
         self.dt_history = []
-        self.ll_history = []
+        self.dt_fr_history = []
         self.acceptance_history = []
-        self.kl_hist = False
+        
+        # Free-reuse caches
+        self._last_cub_points = None
+        self._last_logs = None
 
-    def _get_pos_increments(self, mu, R, logws):
-        """
-        Wrapper for calculating Wasserstein trajectory
-        """
-        dm, dR = compute_increments(
-            means=mu,
-            Rs=R,
-            logws=logws,
-            grad_log_target=self.grad_log_posterior,
-            method=self.method, 
-            ns=self.ns,
-            ll=self.ll
+        #self.reg_lambda = 1e2
+        self.lambda_end = 1e-3
+        self.lambda_start = 1e3
+        self.lambda_history = []
+
+        self.t_adam = 0
+        self.m_mu = []
+        self.v_mu = []
+        self.m_R  = []
+        self.v_R  = []
+
+        self.prev_nrmse = 1.0
+
+    def _get_pos_increments(self, mu, R, logws, update_cache=False):
+        """Standard wrapper passed into ODE time integrators."""
+        dm, dR, cub_pts, cub_logs = compute_increments_generic(
+        means=mu,
+        Rs=R,
+        logws=logws,
+        log_and_grad_post=self.log_and_grad_post,
+        mixture_grad_fn=mixture_grad,
+        precond=self.precond,
+        reg_lambda=self.reg_lambda
         )
-        return dm, dR
+
+        # Intercept and cache structural values evaluated during this pass
+        if update_cache:
+            self._last_cub_points = cub_pts
+            self._last_logs = cub_logs
+
+        # 2. Filter them through the isolated component trust region
+        #dm, dR = self._apply_component_trust_region(mu, R, dm_raw, dR_raw)
+
+        return dm, dR  # outputs required by time integration routines
     
+
+    '''def _apply_component_trust_region(self, mu, R, dm, dR):
+        """
+        Damps spatial increments on a per-component basis if they exceed 
+        a local trust-region threshold, keeping healthy components fast.
+        """
+        K = len(mu)
+        dm_controlled = []
+        dR_controlled = []
+        
+        # Trust region threshold: How many multiples of its own scale 
+        # can a component change in a single theoretical unit of time?
+        # 2.0 to 5.0 allows incredibly aggressive, fast Natural Gradient behavior.
+        MAX_GROWTH_RATIO = 50.0
+
+        for k in range(K):
+            # Current physical scale of this specific component
+            norm_R = np.linalg.norm(R[k], ord='fro')
+            
+            # Proposed raw changes for this step
+            norm_dm = np.linalg.norm(dm[k])
+            norm_dR = np.linalg.norm(dR[k], ord='fro')
+            
+            # Find the maximum relative explosive force of this component
+            # We protect against division by zero if a component has completely collapsed
+            scale_denominator = max(norm_R, 1e-5)
+            rel_mu_speed = norm_dm / scale_denominator
+            rel_R_speed = norm_dR / scale_denominator
+            
+            max_rel_speed = max(rel_mu_speed, rel_R_speed)
+            
+            # If the component goes crazy, calculate a custom local brake factor
+            if max_rel_speed > MAX_GROWTH_RATIO:
+                local_brake = MAX_GROWTH_RATIO / max_rel_speed
+                
+                # Print a warning so you track who is misbehaving
+                print(f" [Trust Region] Component {k+1} penalized! Local brake: {local_brake:.4f}")
+                
+                dm_controlled.append(dm[k] * local_brake)
+                dR_controlled.append(dR[k] * local_brake)
+            else:
+                # Well-behaved component: zero interference, full natural gradient speed!
+                dm_controlled.append(dm[k])
+                dR_controlled.append(dR[k])
+            
+        return dm_controlled, dR_controlled'''
+
+
     def _get_w_increments(self, mu, R, logws):
-        """Wrapper for calculating Fisher-Rao Weight trajectory"""
+        """Reuses cached log evaluations directly from the position pass."""
+        if self._last_logs is None:
+            raise RuntimeError("Weight increments requested, but no spatial cache exists.")
+            
         dlogws = compute_weight_increments(
             means=mu,
             Rs=R,
             logws=logws,
-            log_target=self.log_posterior,
-            method=self.method,
-            ns=self.ns
+            cached_log_targets=self._last_logs
         )
-        return dlogws # 0.01
-    
+        return dlogws
 
-    def _advance_weights(self, mu, R, logws, iter_idx, m_w, v_w, step_size_w):
-        """Advances the weight vectors by dt * dt_factor."""
-        if self.time_scheme == 'euler':
-            logws = euler_step_w(mu, R, logws, self._get_w_increments, step_size_w)
-        elif self.time_scheme == 'heun_adaptive':
-            effective_dt = min(step_size_w, 0.01)
-            logws = euler_step_w(mu, R, logws, self._get_w_increments, effective_dt)
-        elif self.time_scheme == 'rk4':
-            logws = rk4_step_w(mu, R, logws, self._get_w_increments, step_size_w)
-        elif self.time_scheme == 'adam':
-            logws = adam_step_w(mu, R, logws, iter_idx, self._get_w_increments, step_size_w, m_w, v_w)
+
+    def _advance_weights(self, mu, R, logws, dt_pos, it):
+        """
+        Advances weights using a staggered WFR approach. Uses the accepted 
+        spatial step (dt_pos) as a dynamic baseline to scale weight updates.
+        """
+        K = len(mu)
+        if K == 1:
+            return logws
+
+        # 1. Classical Explicit Euler Branch
+        if self.time_scheme_fr == 'euler':
+            effective_dt_w = dt_pos * self.step_size_w
+            return euler_step_w(mu, R, logws, self._get_w_increments, effective_dt_w)
+
+        # 2. Staggered WFR Adaptive Branch
+        elif self.time_scheme_fr == 'heun_adaptive':
+            # Extract expectations and compute component weights
+            Es = compute_Es_cached(mu, R, logws, self._last_logs)
+            ws = np.exp(logws)
+            mean_E = np.sum(ws * Es)
+            # Compute the Fisher-Rao speed (volatility of energies)
+            fr_variance = np.sum(ws * (Es - mean_E)**2)
+            fr_speed = np.sqrt(fr_variance)
+            # Target a maximum geometric displacement on the simplex per step
+            delta_max = getattr(self, 'delta_max', 0.02) #between 0.01 (poor init) up to 0.05
+            adaptive_dt_w = min(0.1, delta_max / (fr_speed + 1e-3)) # set a max FR to 0.1
+            # --- THE WFR COUPLING MECHANISM ---
+            # We use the accepted dt_pos as our global time-scale budget.
+            # self.step_size_w acts as your global strategy modifier.
+            # The final step is the strict minimum of what the spatial budget allows 
+            # and what the local weight speed limit demands.
+            budget = 0.5*self.n_iter# / 2.
+            #max_weight_dt = adaptive_dt_w # min(global_budget_dt, adaptive_dt_w)
+            max_weight_dt = min(1.0, it/budget)*adaptive_dt_w
+            #max_weight_dt = adaptive_dt_w
+            print("FR step = ", max_weight_dt)
+            # print("FR speed dt", delta_max / (fr_speed + 1e-3))
+            # --- REPLICATOR DYNAMICS UPDATE ---
+            # 1. Step forward in unnormalized log space
+            unc_logws = logws - max_weight_dt * Es
+            # 2. Normalize safely back onto the simplex
+            new_logws = unc_logws - logsumexp(unc_logws)
+            # Log history and return the updated log weights
+            self.dt_fr_history.append(max_weight_dt)
+            return new_logws
+
         else:
-            raise ValueError(f"Scheme '{self.time_scheme}' not recognized for weights.")
-        return logws
-    
+            raise ValueError(f"Scheme '{self.time_scheme_fr}' not implemented for weights.")
 
-    def _advance_pos(self, mu, R, logws, iter, m_mu, v_mu, m_R, v_R):
-        """
-        Internal wrapper to freeze configurations. 
-        Ensures you never re-specify targets or methods in the solver loop.
-        """
+
+    def _advance_pos(self, mu, R, logws, it):
         dt = self.step_size
         accepted = True
+        tau = min(1., (it - 1) / (self.n_iter - 1))
+        self.reg_lambda = self.lambda_start * (self.lambda_end / self.lambda_start) ** (tau)
+        
         if self.time_scheme == 'euler':
             m1, R1 = euler_step_pos(mu, R, logws, self._get_pos_increments, dt)
-        elif self.time_scheme == 'rk4':
-            m1, R1 = rk4_step_pos(mu, R, logws, self._get_pos_increments, dt)
-        elif self.time_scheme == 'adam':
-            m1, R1 = adam_step_pos(mu, R, logws, iter, self._get_pos_increments, dt, m_mu, v_mu, m_R, v_R)
         elif self.time_scheme == 'heun_adaptive':
-            # Default tolerances can be made class attributes: self.rtol, self.atol
-            m1, R1, dt, accepted = heun_adaptive_step_pos(
+            m1, R1, dt_actual, accepted = heun_adaptive_step_pos(
                 mu, R, logws, self._get_pos_increments, dt, 
-                rtol=getattr(self, 'rtol', 1e-3), 
-                atol=getattr(self, 'atol', 1e-6)
+                rtol=getattr(self, 'rtol', 5e-2),#1e-2, 5e-2
+                atol=getattr(self, 'atol', 1e-2)#1e-3, 1e-2
             )
-            self.step_size = dt # Update the stored step size
-            # --- ADAPTIVE LAMBDA STRATEGY ---
-            target_ll = 0.2 if accepted else 0.50
-            self.ll = 0.9 * self.ll + 0.1 * target_ll
+            #m1, R1, dt_actual, accepted = heun_adaptive_step_pos2(
+            #    mu, R, logws, self._get_pos_increments, dt
+            #)
+            self.step_size = dt_actual
+            if accepted:
+                self.cumulative_dist += dt_actual
         else:
-            raise ValueError("time-stepping scheme not implemented !")
+            raise ValueError(f"Scheme '{self.time_scheme}' not implemented.")
         
         self.dt_history.append(dt)
-        self.ll_history.append(self.ll)
         self.acceptance_history.append(accepted)
-
         return m1, R1, accepted, dt
 
-    def plot_diagnostics(self):
-        import matplotlib.pyplot as plt
-        
-        fig, ax1 = plt.subplots(figsize=(10, 4))
-        
-        # Plot Step Size (dt) on the left axis
-        color = 'tab:blue'
-        ax1.set_xlabel('Solver Sub-steps (including rejections)')
-        ax1.set_ylabel('Step Size (dt)', color=color)
-        ax1.plot(self.dt_history, color=color, alpha=0.8, label='dt')
-        ax1.tick_params(axis='y', labelcolor=color)
-        
-        # Plot Lambda Damping on the right axis
-        ax2 = ax1.twinx()  
-        color = 'tab:orange'
-        ax2.set_ylabel('Damping (lambda)', color=color)
-        ax2.plot(self.ll_history, color=color, linestyle='--', alpha=0.8, label='lambda')
-        ax2.tick_params(axis='y', labelcolor=color)
-        
-        # Mark rejections with red vertical dots
-        rejection_indices = [i for i, acc in enumerate(self.acceptance_history) if not acc]
-        for idx in rejection_indices:
-            ax1.axvline(x=idx, color='red', alpha=0.2, linestyle=':')
-            
-        plt.title('Joint Adaptive Evolution: Step Size vs Geometric Damping')
-        fig.tight_layout()
-        plt.show()
-
-    def _sample_from_gmm(self, mu, R, weights, num_samples=10000):
-        """Draws exact Monte Carlo samples from the current GMM approximation."""
-        K = len(weights)
-        dim = mu[0].shape[0]
-        comp_indices = self.rng.choice(K, size=num_samples, p=weights)
-        samples = np.zeros((num_samples, dim))
-        for k in range(K):
-            mask = (comp_indices == k)
-            n_k = np.sum(mask)
-            if n_k > 0:
-                z = self.rng.normal(size=(n_k, dim))
-                samples[mask] = mu[k] + z @ R[k].T
-        return samples
-
-    def _evaluate_gmm_logpdf(self, samples, mu, R, weights):
-        """Evaluates log q(x) safely using logsumexp."""
-        K = len(weights)
-        N, dim = samples.shape
-        log_probs = np.zeros((N, K))
-        for k in range(K):
-            diff = samples - mu[k]
-            z = solve_triangular(R[k], diff.T, lower=True).T
-            log_det = np.sum(np.log(np.diagonal(R[k])))
-            log_probs[:, k] = (np.log(weights[k]) 
-                               - 0.5 * dim * np.log(2 * np.pi) 
-                               - log_det 
-                               - 0.5 * np.sum(z**2, axis=1))
-        return logsumexp(log_probs, axis=1)
-
-    def _compute_current_kl(self, mu, R, weights, mc_samples=2000):
-        """Computes D_KL(q || p) via robust Monte Carlo simulation."""
-        samples = self._sample_from_gmm(mu, R, weights, num_samples=mc_samples)
-        log_q = self._evaluate_gmm_logpdf(samples, mu, R, weights)
-        log_p = np.array([self.log_posterior(s) for s in samples])
-        return np.mean(log_q - log_p)
-    
 
     def _sample(self, x0, R0):
-        '''Integrate ODE for mu and R over n_iter steps.
-        Initialize R from Sigma0's Cholesky and run inference.
-        '''
         K = len(x0)
-        mu = x0.copy()
-        R = R0.copy()
-        means_hist, Rs_hist = [ [m.copy() for m in mu] ], [ [r.copy() for r in R] ]
-        # Initialize Uniform weights in log space
+        dim = x0[0].shape[0]
+        mu, R = x0.copy(), R0.copy()
+        means_hist, Rs_hist = [[m.copy() for m in mu]], [[r.copy() for r in R]]
         logws = np.array([np.log(1.0 / K) for _ in range(K)])
         weights_hist = [np.exp(logws).copy()]
+        current_w = weights_hist[0]
         kl_hist = []
 
-        m_mu, v_mu, m_R, v_R, m_w, v_w = init_states(mu, R, logws)
-
-        # Flag to check if we should evolve weights (WFR) or keep them fixed (Pure Wasserstein)
         evolve_weights = (K > 1) and (self.step_size_w > 0.0)
-
         rejected_steps_count = 0
-        max_rejections = 500
-
         i = 1
-        while i <= self.n_iter:
-            #if evolve_weights:
-            #    logws = self._advance_weights(mu, R, logws, i, m_w, v_w, dt_factor=0.5)
 
-            mu_next, R_next, accepted, dt_new = self._advance_pos(mu, R, logws, i, m_mu, v_mu, m_R, v_R)
+        #early_stopper = VariationalEarlyStopping(kl_tol=5e-6, patience_window=8)
+
+        while i <= self.n_iter:
+            #dt_actual = self.step_size
+            mu_next, R_next, accepted, dt_new = self._advance_pos(mu, R, logws, i)
+
             if accepted:
-                mu, R = mu_next, R_next
+                dt_actual = dt_new
+                # estimate KL through current cubature points
+                if self.kl_track and self._last_cub_points is not None:
+                    cub_weights = []
+                    for k in range(K):
+                        for _ in range(2 * dim):
+                            cub_weights.append(current_w[k] / (2 * dim))
+                    cub_weights = np.array(cub_weights)
+                    
+                    current_kl = self.kl_track.estimate_kl_mgvi(
+                        cubature_points=self._last_cub_points,
+                        cubature_weights=cub_weights,
+                        cached_log_p=self._last_logs,
+                        mu=mu, 
+                        R=R, 
+                        weights=current_w
+                    )
+                    kl_hist.append(current_kl)
+                    #if early_stopper.update(current_kl, step_accepted=True):
+                    #    break
+
                 if evolve_weights:
-                    logws = self._advance_weights(mu, R, logws, i, m_w, v_w, dt_new)
-                current_w = np.exp(logws).copy()
-                # Keep trace histories
+                    logws_next = self._advance_weights(mu, R, logws, dt_actual, i)
+                    current_w = np.exp(logws_next).copy()
+                    logws = logws_next
+                
+                mu, R = mu_next, R_next
+                
+                self.lambda_history.append(self.reg_lambda)
                 means_hist.append([m.copy() for m in mu])
                 Rs_hist.append([r.copy() for r in R])
-                weights_hist.append(np.exp(logws).copy())
-                if self.kl_track:
-                    log_p_values = [self.log_posterior(particles[p, :]) for p in range(n)]
-                    current_kl = self.kl_track.estimate_kl_mgvi(particles, log_p_values)
-                    kl_hist.append(current_kl)
-                    # kl_hist.append(self._compute_current_kl(mu, R, current_w))
-                
-                # Debug tracking diagnostics
-                if i % 1 == 0 or i == 1:
-                    print(f"Iteration {i:3d} | Step size {self.step_size:3f} | KL: {kl_hist[-1]:.4f}")
-                    for k in range(K):
-                        cov = R[k] @ R[k].T
-                        std = np.sqrt(np.diag(cov))
-                        print(f"  Comp {k} | Weight: {np.exp(logws[k]):.4f} | Mean[0]: {mu[k][0]:.4f} | Std[0]: {std[0]:.4f}")
+                weights_hist.append(current_w)
                         
-                i += 1  # Securely advance the actual iteration count
+                if i % 1 == 0 or i == 1:
+                    kl_val = kl_hist[-1] if kl_hist else 0.0
+                    print(f"Iter {i:3d} | dt: {dt_new:.4f} | KL: {kl_val:.4f}")
+                    cov0 = R[0] @ R[0].T
+                    std0 = np.sqrt(np.diag(cov0))
+                    if K > 1:
+                        cov1 = R[1] @ R[1].T
+                        std1 = np.sqrt(np.diag(cov1))
+                        cov2 = R[2] @ R[2].T
+                        std2 = np.sqrt(np.diag(cov2))
+                        print('------------')
+                        print(f"weights {current_w}")
+                        print(f"mean 0 {mu[0]}")
+                        print(f"std 0 {std0}")
+                        print(f"mean 1 {mu[1]}")
+                        print(f"std 1 {std1}")
+                        print(f"mean 2 {mu[2]}")
+                        print(f"std 2 {std2}")
+                i += 1
             else:
                 rejected_steps_count += 1
-                if rejected_steps_count > max_rejections:
-                    raise RuntimeError(f"Solver failed: Step size reduced too many times without succeeding.")
+                #if early_stopper.update(None, step_accepted=False):
+                #    break
+                if rejected_steps_count > self.max_rejections:
+                    raise RuntimeError("Solver failed: Too many rejected steps.")
     
-        print("number of rejected steps = ", rejected_steps_count)
+        print("Number of rejected steps = ", rejected_steps_count)
         return mu, R, np.exp(logws), means_hist, Rs_hist, weights_hist, kl_hist

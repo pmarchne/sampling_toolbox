@@ -1,7 +1,6 @@
 import numpy as np
 from sampling_toolbox.base import ParticleMethod
 from sampling_toolbox.utilities.kl_tracker import GenericKLTracker
-from sampling_toolbox.utilities.numerical_precond import NumericalPreconditioner
 
 class ULA(ParticleMethod):
     """
@@ -50,20 +49,12 @@ class ULA(ParticleMethod):
         self.precond = preconditioner
         self.div_precond = div_preconditioner
         self.kl_track = GenericKLTracker(0.)
-        if isinstance(self.precond, str) and self.precond == 'numerical':
-            self.fd_precond = NumericalPreconditioner(self.grad_log_posterior)
-        else:
-            self.fd_precond = None
+        self.fd_precond = None
             
 
     def _Q(self, x):
         if self.precond is None:
             return np.eye(len(x) if x is not None else 2)
-        elif isinstance(self.precond, str):
-            if self.precond == 'numerical':
-                return self.fd_precond.get_Q(x)
-            else:
-                raise ValueError(f"Unknown string preconditioner option: {self.precond}")
         elif callable(self.precond):
             return self.precond(x)
         elif isinstance(self.precond, np.ndarray):
@@ -74,8 +65,6 @@ class ULA(ParticleMethod):
     def _div_Q(self, x):
         if self.div_precond is None:
             return np.zeros_like(x)
-        elif isinstance(self.precond, str) and self.precond == 'numerical':
-            return self.fd_precond.get_div_Q(x)
         elif callable(self.div_precond):
             return self.div_precond(x)
         elif isinstance(self.precond, np.ndarray):

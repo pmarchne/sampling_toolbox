@@ -1,13 +1,9 @@
 import numpy as np
 
-from sampling_toolbox.svgd import SVGD
-from sampling_toolbox.langevin import ULA
-from sampling_toolbox.aldi import ALDI
-from plotting import plot_result, plot_result_gmm, plot_vi_diagnostics
-from benchmarks_2D import rosenbrock2d_log, rosenbrock2d_grad_log, rosenbrock2d_hessian_gn_log, rosenbrock2d_div_Q
+from plotting import plot_result_gmm
+from benchmarks_2D import rosenbrock2d_log, rosenbrock2d_grad_log
 from sampling_toolbox.gauss_vi import GaussianODE
-from scipy.special import logsumexp
-from scipy.stats import wasserstein_distance
+from sampling_toolbox.utilities.kl_tracker import GenericKLTracker
 
 def log_prior(x):
     return 0.0
@@ -16,299 +12,282 @@ def grad_log_prior(x):
     return np.zeros_like(x)
 
 def f(x):
-    return rosenbrock2d_log(x, alpha=0.5)
+    return rosenbrock2d_log(x, 0.5)
 
 def df(x):
-    return rosenbrock2d_grad_log(x, alpha=0.5)
+    return rosenbrock2d_grad_log(x, 0.5)
 
-def df_hessian_preconditioned(x):
-    # Compute base gradient
-    base_grad = rosenbrock2d_grad_log(x, alpha=0.5)
-    # Compute Hessian matrix at current point
-    hess = rosenbrock2d_hessian_gn_log(x)
-    hess_inv = np.linalg.inv(-hess)
-    return hess_inv @ base_grad
-    
-def initialize():
-    # Setup the target
-    rng = np.random.default_rng(1)
-    dt = 0.0005
-    nsteps = 4000
+def log_and_grad_post(x):
+    return f(x), df(x)
 
-    mu = np.array([-2., 10.])
-    sigma = np.array([2., 2.])
-    nparticles = 200
-    initial_particles = rng.normal(loc=mu, scale=np.sqrt(sigma), size=(nparticles, len(mu)))
+from scipy.stats import multivariate_normal
 
-    print(f"init particles max: {np.max(initial_particles, axis=0)}")
-    print(f"init particles min: {np.min(initial_particles, axis=0)}")
-    print(f"Initial mean 0: {np.mean(initial_particles, axis=0)}")
-    print(f"Initial std 0: {np.std(initial_particles, axis=0)}")
-
-    return initial_particles, dt, nsteps, rng
-
-def run_svgd(particles, dt, nsteps, rng):
-    svgd = SVGD(log_likelihood=f, log_prior=log_prior,
-                grad_log_likelihood=df, grad_log_prior=grad_log_prior,
-                step_size=dt, n_iter=nsteps, rng=rng, tol=1e-5)
-    print("\nRunning SVGD...")
-    s_svgd, s_history = svgd.sample(particles, num_samples=0)
-    svgd.report_calls()
-    svgd.print_statistics(s_svgd)
-    print("svgd finished")
-    return s_history
-
-def dynamic_preconditioner(x):
-    hess = rosenbrock2d_hessian_gn_log(x)
-    return -np.linalg.inv(hess)
-
-def run_langevin(particles, dt, nsteps, rng):
-    x_map = np.array([1., 1.])
-    hess = rosenbrock2d_hessian_gn_log(x_map)
-    hess_inv = -np.linalg.inv(hess)
-    print(hess_inv)
-    # hess_inv = np.eye(2)
-    #print("hessian inverse at map", hess_inv)
-    ula = ULA(log_likelihood=f, log_prior=log_prior,
-                grad_log_likelihood=df, grad_log_prior=grad_log_prior,
-                step_size=dt, n_iter=nsteps, rng=rng, preconditioner=dynamic_preconditioner,
-                div_preconditioner=rosenbrock2d_div_Q)
-    print("\nRunning ULA...")
-    s_ula, s_history = ula.sample(particles, num_samples=0)
-    ula.report_calls()
-    ula.print_statistics(s_ula)
-    print("ula finished")
-    return s_history
-
-def run_aldi(particles, dt, nsteps, rng):
-    aldi = ALDI(log_likelihood=f, log_prior=log_prior,
-                grad_log_likelihood=df, grad_log_prior=grad_log_prior,
-                step_size=dt, n_iter=nsteps, rng=rng)
-    print("\nRunning ALDI...")
-    s_aldi, s_history = aldi.sample(particles, num_samples=0)
-    aldi.report_calls()
-    aldi.print_statistics(s_aldi)
-    print("aldi finished")
-    return s_history
-
-'''if __name__ == "__main__":
-    init_particles, dt, nsteps, rng = initialize()
-    samples_history_svgd = run_svgd(init_particles, dt, nsteps, rng)
-    samples_history_ula = run_langevin(init_particles, dt, nsteps, rng)
-    samples_history_aldi = run_aldi(init_particles, dt, nsteps, rng)
-
-    print(samples_history_svgd[0].shape)
-    n_grid = 200
-    xlim = 10 
-    ylim = 5 
-    x = np.linspace(-xlim, xlim, n_grid) 
-    y = np.linspace(-ylim, ylim+60, n_grid) 
-    X, Y = np.meshgrid(x, y, indexing="xy") # shape (n_gridy, n_gridx)
-    logPOST = f((X, Y))
-    plot_result(
-        X,
-        Y,
-        logPOST,
-        samples_history_svgd[-1],  # optional
-        method='svgd'
-    )
-    plot_result(
-        X,
-        Y,
-        logPOST,
-        samples_history_ula[-1],  # optional
-        method='ula'
-    )
-    plot_result(
-        X,
-        Y,
-        logPOST,
-        samples_history_aldi[-1],  # optional
-        method='aldi'
-    )'''
-
-def evaluate_and_compare_evidence(X, Y, logPOST, gvi, final_mean, final_R, final_ws, mc_samples=20000):
+def recompute_gmm_kl(means_hist, Rs_hist, weights_hist, log_post_fn, logZ, n_samples=20000, seed=42):
     """
-    Computes log Z from the grid and compares it with the ELBO and 
-    Importance Sampling estimates derived from the trained GMM.
+    Recomputes the true KL history using Monte Carlo sampling.
     """
-    # ----------------------------------------------------
-    # 1. Compute Ground Truth log Z from the 2D Grid
-    # ----------------------------------------------------
-    # Extract coordinate vectors from grid to find step sizes
-    x_vec = X[0, :]
-    y_vec = Y[:, 0]
-    dx = x_vec[1] - x_vec[0]
-    dy = y_vec[1] - y_vec[0]
+    np.random.seed(seed)
+    kl_history = []
     
-    # 2D integration via Log-Sum-Exp
-    log_Z_grid = logsumexp(logPOST) + np.log(dx) + np.log(dy)
-    
-    # ----------------------------------------------------
-    # 2. Compute ELBO and Importance Sampling from GMM
-    # ----------------------------------------------------
-    # Draw exact Monte Carlo samples from the converged GMM
-    samples = gvi._sample_from_gmm(final_mean, final_R, final_ws, num_samples=mc_samples)
-    
-    # Evaluate log q(x) and log p*(x) for those samples
-    log_q = gvi._evaluate_gmm_logpdf(samples, final_mean, final_R, final_ws)
-    log_p = np.array([gvi.log_posterior(s) for s in samples])
-    
-    # Difference vector
-    log_weights = log_p - log_q
-    
-    # Calculate Metrics
-    elbo = np.mean(log_weights)
-    log_Z_gmm_is = logsumexp(log_weights) - np.log(mc_samples)
-    
-    # ----------------------------------------------------
-    # 3. Print Comparison Report
-    # ----------------------------------------------------
-    print("\n" + "="*50)
-    print("           LOG EVIDENCE (log Z) COMPARISON")
-    print("="*50)
-    print(f"Ground Truth (2D Grid Integration):   {log_Z_grid:11.5f}")
-    print(f"GMM Importance Sampling Estimate:     {log_Z_gmm_is:11.5f}")
-    print(f"GMM Variational Lower Bound (ELBO):   {elbo:11.5f}")
-    print("-"*50)
-    print(f"True KL Gap (log Z - ELBO):           {log_Z_grid - elbo:11.5f}")
-    print(f"IS Residual Error (|Grid - IS|):       {np.abs(log_Z_grid - log_Z_gmm_is):11.5f}")
-    print("="*50)
-    
-    return log_Z_grid, log_Z_gmm_is, elbo
+    # Iterate through each saved step of the optimizer
+    for t in range(len(means_hist)):
+        mus = means_hist[t]
+        Rs = Rs_hist[t]
+        weights = weights_hist[t]
+        
+        n_comp = len(weights)
+        dim = len(mus[0])
+        
+        # 1. Sample component indices based on weights
+        comp_choices = np.random.choice(n_comp, size=n_samples, p=weights)
+        
+        # 2. Draw samples from the chosen GMM components
+        samples = np.zeros((n_samples, dim))
+        for i in range(n_comp):
+            idx = (comp_choices == i)
+            n_idx = np.sum(idx)
+            if n_idx > 0:
+                z = np.random.normal(size=(n_idx, dim))
+                samples[idx] = mus[i] + z @ Rs[i].T
+                
+        # 3. Evaluate log q(x) for all samples
+        q_densities = np.zeros(n_samples)
+        for i in range(n_comp):
+            Sigma = Rs[i] @ Rs[i].T
+            q_densities += weights[i] * multivariate_normal.pdf(samples, mean=mus[i], cov=Sigma)
+        log_q = np.log(q_densities + 1e-15)
+        
+        # 4. Evaluate target log p*(x)
+        log_p_star = log_post_fn((samples[:, 0], samples[:, 1]))
+        
+        # 5. Compute expectation: E_q[log q - log p*] + logZ
+        kl_step = np.mean(log_q - log_p_star) + logZ
+        kl_history.append(kl_step)
+        
+    return np.array(kl_history)
 
-
-def compute_distribution_distances(X, Y, logPOST, gvi, final_mean, final_R, final_ws):
-    """
-    Computes the 2D Total Variation distance and the 1D Wasserstein distances 
-    for the X and Y marginal distributions by comparing the GMM to the grid reference.
-    """
-    # 1. Extract the underlying 1D coordinate axes
-    # For indexing="xy", X varies across columns, Y varies across rows
-    x_vec = X[0, :]
-    y_vec = Y[:, 0]
-    
-    # 2. Create normalized PMF for the Reference Target PDF
-    # Normalize in log-space first to protect against underflow vulnerabilities
-    P_grid = np.exp(logPOST - logsumexp(logPOST))
-    
-    # 3. Evaluate and Normalize GMM PDF over the exact same grid coordinate space
-    grid_points = np.column_stack([X.ravel(), Y.ravel()])
-    log_q = gvi._evaluate_gmm_logpdf(grid_points, final_mean, final_R, final_ws)
-    log_q_grid = log_q.reshape(X.shape)
-    Q_grid = np.exp(log_q_grid - logsumexp(log_q_grid))
-    
-    # 4. Calculate 2D Total Variation (TV) Distance
-    # Formula: 0.5 * sum(|P - Q|)
-    tv_distance = 0.5 * np.sum(np.abs(P_grid - Q_grid))
-    
-    # 5. Extract 1D Marginal PMFs by summing out the opposite dimension
-    # Summing over axis=0 (rows/Y) leaves the X marginal profile
-    P_x = np.sum(P_grid, axis=0)
-    Q_x = np.sum(Q_grid, axis=0)
-    
-    # Summing over axis=1 (columns/X) leaves the Y marginal profile
-    P_y = np.sum(P_grid, axis=1)
-    Q_y = np.sum(Q_grid, axis=1)
-    
-    # 6. Calculate 1D Wasserstein Distances via Scipy
-    # Uses the coordinate grids as spatial positions and marginal sums as weights
-    w1_x = wasserstein_distance(x_vec, x_vec, u_weights=P_x, v_weights=Q_x)
-    w1_y = wasserstein_distance(y_vec, y_vec, u_weights=P_y, v_weights=Q_y)
-    
-    # Print Metrics Summary
-    print("\n" + "="*50)
-    print("         GEOMETRIC & STATISTICAL DISTANCES")
-    print("="*50)
-    print(f"Total Variation (TV) Distance (2D):   {tv_distance:.5f}")
-    print(f"1D Wasserstein Distance (X marginal): {w1_x:.5f}")
-    print(f"1D Wasserstein Distance (Y marginal): {w1_y:.5f}")
-    print("="*50)
-    
-    return tv_distance, w1_x, w1_y
-
-
-def generate_random_gmm_init(n_components=3, mode='standard', seed=None):
+def generate_random_gmm_init(n_components=3, seed=None):
     if seed is not None:
         np.random.seed(seed)
-        
+    mu = []
+    sigma = []
+    for i in range(n_components):
+        x1 = np.random.uniform(-9, 9)
+        x2 = np.random.uniform(-10, 60)
+        std_x1 = 1.
+        std_x2 = std_x1
+        mu.append(np.array([x1, x2]))
+        sigma.append(np.diag([std_x1**2, std_x2**2]))
+        print("mean", i, "is", mu)
+    return mu, sigma
+
+def generate_grid_gmm_init():
+    """
+    Initializes exactly 6 components on a uniform 2D grid:
+    x = [-5.0, 0.0, 5.0]
+    y = [-5.0, 20.0]
+    """
     mu = []
     sigma = []
     
-    # 1. Define the geometric domain based on your target plots
-    # x1 (horizontal) spans roughly -6 to 6
-    # x2 (vertical) spans roughly 0 to 45
+    # Define the exact grid coordinates specified
+    x_coords = [-4.0, 0.0, 4.0] #  [-4.0, 0.0, 4.0]
+    y_coords =  [-8.0, 50.0] # [-8.0, 40.0]
     
-    for _ in range(n_components):
-        if mode == 'stiff':
-            # STRESS TEST 1: Components start ultra-sharp (tiny variances)
-            # This triggers massive initial gradients
-            x1 = np.random.uniform(-5.0, 5.0)
-            x2 = np.random.uniform(5.0, 35.0)
-            std_x1 = np.random.uniform(0.05, 0.2)
-            std_x2 = np.random.uniform(0.05, 0.2)
+    # Iterate systematically to generate 3 * 2 = 6 coordinates
+    for y in y_coords:
+        for x in x_coords:
+            # Set the mean vector
+            mean_vector = np.array([x, y])
+            mu.append(mean_vector)
             
-        elif mode == 'far_away':
-            # STRESS TEST 2: Components start completely trapped out in the cold
-            x1 = np.random.uniform(-7.0, 7.0)
-            x2 = np.random.uniform(30.0, 50.0) 
-            std_x1 = np.random.uniform(0.5, 2.0)
-            std_x2 = np.random.uniform(0.5, 2.0)
+            # Spherical initial standard deviation
+            std_val = 1.5 #1.5
+            cov_matrix = np.diag([std_val**2, std_val**2])
+            sigma.append(cov_matrix)
             
-        else:
-            # STANDARD RANDOM: A healthy, diverse spread
-            x1 = np.random.uniform(-6.0, 6.0)
-            x2 = np.random.uniform(2.0, 30.0)
-            # Log-uniform sampling for robust scale diversity
-            std_x1 = np.exp(np.random.uniform(np.log(0.1), np.log(3.0)))
-            std_x2 = np.exp(np.random.uniform(np.log(0.1), np.log(3.0)))
+            print(f"Component {len(mu)-1} initialized at grid point: [{x}, {y}]")
             
-        mu.append(np.array([x1, x2]))
-        sigma.append(np.diag([std_x1**2, std_x2**2]))
-        
     return mu, sigma
 
 
 if __name__ == "__main__":
-    dt = 0.00015 # 0.08
-    nit = 300
-    n_comp = 10
-    mu, sigma = generate_random_gmm_init(n_components=n_comp, mode='far_away', seed=2)
-    print(mu)
-    print(sigma)
-    #mu = [np.array([-0.5, 15.]), np.array([-3, 40.]), np.array([3., 5.])]
-    #sigma = [np.diag([1**2, 1**2]), np.diag([1.**2, 1.**2]), np.diag([0.1**2, 0.1**2])]
-
-    gvi = GaussianODE(f, df, log_prior, grad_log_prior, step_size=dt, n_iter=nit, method='cubature_hess', time_scheme='heun_adaptive', num_samples=100, step_size_w=0.)
-    # gvi = GaussianODE(f, df, log_prior, grad_log_prior, step_size=dt, n_iter=nit, method='cubature', time_scheme='heun_adaptive', num_samples=500, step_size_w=0.1)
-
-    R = [np.linalg.cholesky(sigma[i]) for i in range(n_comp)]
-
-    print(f"current mean {mu}")
-    cov = R[0] @ R[0].T
-    std = np.sqrt(np.diag(cov))
-    print(f"current std {std}")
-
-    final_mean, final_R, final_ws, means, Rs, ws, kl_h = gvi.sample(mu, R)
-    gvi.plot_diagnostics()
-    #final_cov = final_R @ final_R.T
-    #std = np.sqrt(np.diag(final_cov))
-    #print(final_mean)
-    #print(std)
-    gvi.report_calls()
-
-    n_grid = 200
-    xlim = 10 
-    ylim = 15 
-    x = np.linspace(-xlim, xlim, n_grid) 
-    y = np.linspace(-ylim, ylim+60, n_grid) 
-    X, Y = np.meshgrid(x, y, indexing="xy") # shape (n_gridy, n_gridx)
+    n_grid = 400
+    xlim = 10.
+    ylim = 15.
+    x = np.linspace(-xlim, xlim, 3000) 
+    dx = x[1] - x[0]
+    y = np.linspace(-ylim, ylim+70, 3000)
+    dy = y[1] - y[0]
+    X, Y = np.meshgrid(x, y, indexing="xy")
     logPOST = f((X, Y))
+    max_logPOST = np.max(logPOST)
+    log_sum_exp_grid = max_logPOST + np.log(np.sum(np.exp(logPOST - max_logPOST)))
+    logZ = log_sum_exp_grid + np.log(dx*dy)
+    print(f"Log Evidence (log Z): {logZ}")
 
-    evaluate_and_compare_evidence(X, Y, logPOST, gvi, final_mean, final_R, final_ws, mc_samples=20000)
-    compute_distribution_distances(X, Y, logPOST, gvi, final_mean, final_R, final_ws)
+    dt = 0.002
+    dtw = 0.01 #0.2 # 0.5 #0.01 # 0.01
+    nit = 300 # 400
+    n_comp = 6
+    mu, sigma = generate_grid_gmm_init() #generate_random_gmm_init(n_components=n_comp, seed=12)
+    mu_in = [m.copy() for m in mu]
+    R = [np.linalg.cholesky(sigma[i]) for i in range(n_comp)]
+    R_in  = [r.copy() for r in R]
 
-    plot_result_gmm(X, Y, logPOST, mus=final_mean, Rs=final_R, weights=final_ws)
-    plot_vi_diagnostics(means, Rs, ws, kl_h)
+    integrator ='heun_adaptive'
+    integrator_fr = 'heun_adaptive'
+    precond = ['None', 'natural', 'hessian']
+    gvi_id = GaussianODE(log_and_grad_post, step_size=dt, n_iter=nit, time_scheme=integrator, time_scheme_fr=integrator_fr, precond=precond[0], step_size_w=dtw)
+    gvi_nat = GaussianODE(log_and_grad_post, step_size=dt, n_iter=nit, time_scheme=integrator, time_scheme_fr=integrator_fr, precond=precond[1], step_size_w=dtw)
+    #gvi_hess = GaussianODE(log_and_grad_post, step_size=dt, n_iter=nit, time_scheme=integrator, time_scheme_fr=integrator_fr, precond=precond[2], step_size_w=dtw)
+    gvi_id.kl_track = GenericKLTracker(logZ)
+    gvi_nat.kl_track = GenericKLTracker(logZ)
+    #gvi_hess.kl_track = GenericKLTracker(logZ)
 
+    final_mean_id, final_R_id, final_ws_id, means_id, Rs_id, ws_id, kl_hist_id = gvi_id.sample([m.copy() for m in mu_in], [r.copy() for r in R])
+    final_mean_nat, final_R_nat, final_ws_nat, means_nat, Rs_nat, ws_nat, kl_hist_nat = gvi_nat.sample([m.copy() for m in mu_in], [r.copy() for r in R])
+    #final_mean_hess, final_R_hess, final_ws_hess, means_hess, Rs_hess, ws_hess, kl_hist_hess = gvi_hess.sample([m.copy() for m in mu_in], [r.copy() for r in R])
+
+    path = '/home/marchnep/Documents/Gitlab_repos/2026_MARCHNER_UQFWI/Fig/'
+    colors = {
+        'id': 'green',
+        'nat': 'red',
+        'new': 'blue'
+    }
+
+    labels = {
+        'id': r'Identity',
+        'nat': r'Natural',
+        'new': r'Newton-like'
+    }
+    import matplotlib.pyplot as plt
+    plt.rcParams.update({
+        "font.family": "serif",       # Classic publication serif style
+        "text.usetex": True,         # Set to True if your system has a full local LaTeX installation
+        "font.size": 14,
+        "axes.labelsize": 16,
+        "axes.titlesize": 16,
+        "xtick.labelsize": 14,
+        "ytick.labelsize": 14,
+        "legend.fontsize": 14,
+        "grid.alpha": 0.25,
+        "grid.linestyle": "--"
+    })
+
+    plt.figure(figsize=(6, 2.25))
+    plt.plot(gvi_id.dt_history, color=colors['id'], label=labels['id'], lw=1.7)
+    plt.plot(gvi_nat.dt_history, color=colors['nat'], label=labels['nat'], lw=1.7, linestyle='--')
+    #plt.plot(gvi_hess.dt_history, color=colors['new'], label=labels['new'], lw=1.7, linestyle='-.')
+    plt.xlabel(r'Iteration')
+    plt.ylabel(r'$\Delta t_{W}$')
+    plt.grid(True)
+    plt.xlim([0, nit])
+    #plt.savefig(path+'time_steps.pdf', dpi=300, bbox_inches='tight')
+    #plt.close()
+    plt.show()
+
+    plt.figure()
+    plt.plot(gvi_id.dt_fr_history, color=colors['id'], label=labels['id'], lw=1.7)
+    plt.plot(gvi_nat.dt_fr_history, color=colors['nat'], label=labels['nat'], lw=1.7, linestyle='--')
+    #plt.plot(gvi_hess.dt_fr_history, color=colors['new'], label=labels['new'], lw=1.7, linestyle='-.')
+    plt.title('step size FR')
+    plt.legend()
+    plt.show()
+    #
+
+    estimated_KL_id = np.maximum(1e-4, np.asarray(kl_hist_id))
+    estimated_KL_nat = np.maximum(1e-4, np.asarray(kl_hist_nat))
+    #estimated_KL_hess = np.maximum(1e-4, np.asarray(kl_hist_hess))
+    plt.figure(figsize=(6, 2.25))
+    plt.plot(estimated_KL_id, color=colors['id'], label=labels['id'], lw=1.7)
+    plt.plot(estimated_KL_nat, color=colors['nat'], label=labels['nat'], lw=1.7, linestyle='--')
+    #plt.plot(estimated_KL_hess, color=colors['new'], label=labels['new'], lw=1.7, linestyle='-.')
+    plt.xlabel(r'Iteration')
+    plt.ylabel(r'KL$(\mu \parallel \pi)$')
+    plt.yscale('log')
+    plt.grid(True)
+    plt.xlim([0, nit])
+    plt.ylim([1e-2, 50.])
+    plt.legend()
+    #plt.savefig(path+'KL_gmm.pdf', dpi=300, bbox_inches='tight')
+    #plt.close()
+    plt.show()
+    plt.close()
+
+    print("Recomputing True KL history for Identity...")
+    true_kl_id = recompute_gmm_kl(means_id, Rs_id, ws_id, f, logZ)
     
+    print("Recomputing True KL history for Natural...")
+    true_kl_nat = recompute_gmm_kl(means_nat, Rs_nat, ws_nat, f, logZ)
+
+    print("Recomputing True KL history for Newton...")
+    #true_kl_new = recompute_gmm_kl(means_hess, Rs_hess, ws_hess, f, logZ)
+
+    # Plotting the corrected curves
+    plt.figure(figsize=(6, 2.25))
+    plt.plot(true_kl_id, color=colors['id'], label=labels['id'], lw=1.7)
+    plt.plot(true_kl_nat, color=colors['nat'], label=labels['nat'], lw=1.7, linestyle='--')
+    #plt.plot(true_kl_new, color=colors['new'], label=labels['new'], lw=1.7, linestyle='-.')
+    plt.xlabel(r'Iteration')
+    plt.ylabel(r'KL$(\mu \parallel \pi)$')
+    plt.yscale('log')
+    plt.grid(True)
+    plt.xlim([0, nit])
+    plt.legend()
+    plt.savefig(path+'KL_mc_gmm.pdf', dpi=300, bbox_inches='tight')
+    plt.close()
+    #plt.show()
+
+    plot_result_gmm(X, Y, logPOST, mus_hist=means_nat, Rs=final_R_nat, weights=final_ws_nat, method='Natural', mu0=mu_in)
+    plt.savefig(path+'Rosenbrock_gmm.pdf', dpi=300, bbox_inches='tight')
+    plt.close()
+    #plt.show()
+    
+    plot_result_gmm(X, Y, logPOST, mus_hist=means_id, Rs=final_R_id, weights=final_ws_id, method='Identity', mu0=mu_in)
+    plt.show()
+    plt.close()
+
+    #plot_result_gmm(X, Y, logPOST, mus_hist=means_hess, Rs=final_R_hess, weights=final_ws_hess, method='Newton-like', mu0=mu_in)
+    #plt.show()
+    #plt.close()
+
+    plt.figure(figsize=(6, 2.25))
+    weights_arr = np.array(ws_nat[1:])
+    colors = plt.cm.Reds(np.linspace(0.2, 1, max(n_comp, 5)))
+    for k in range(n_comp):
+        plt.plot(weights_arr[:, k], color=colors[k], lw=2, label=f"Comp {k}")
+    plt.xlabel(r'Iteration')
+    plt.ylabel(r'$w_k$')
+    plt.grid(True)
+    plt.title('Natural')
+    plt.xlim([0, nit])
+    plt.savefig(path+'weights_gmm.pdf', dpi=300, bbox_inches='tight')
+    plt.close()
+    #plt.show()
+
+    #plt.figure(figsize=(6, 2.25))
+    #weights_arr2 = np.array(ws_hess[1:])
+    #colors = plt.cm.Blues(np.linspace(0.2, 1, max(n_comp, 5)))
+    #for k in range(n_comp):
+    #    plt.plot(weights_arr2[:, k], color=colors[k], lw=2, label=f"Comp {k}")
+    #plt.xlabel(r'Iteration')
+    #plt.ylabel(r'$w_k$')
+    #plt.grid(True)
+    #plt.title('Newton')
+    #plt.xlim([0, nit])
+    #plt.show()
+    #plt.close()
+
+    plt.figure(figsize=(6, 2.25))
+    weights_arr3 = np.array(ws_id[1:])
+    colors = plt.cm.Greens(np.linspace(0.2, 1, max(n_comp, 5)))
+    for k in range(n_comp):
+        plt.plot(weights_arr3[:, k], color=colors[k], lw=2, label=f"Comp {k}")
+    plt.xlabel(r'Iteration')
+    plt.ylabel(r'$w_k$')
+    plt.grid(True)
+    plt.title('Identity')
+    plt.xlim([0, nit])
+    plt.show()
+    plt.close()
