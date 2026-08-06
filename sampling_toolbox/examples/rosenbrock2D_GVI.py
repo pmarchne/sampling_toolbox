@@ -22,6 +22,7 @@ def log_and_grad_post(x):
 
 if __name__ == "__main__":
     set_up_plots()
+    savefig = True
     n_grid = 400
     xlim = 10
     ylim = 15
@@ -36,8 +37,8 @@ if __name__ == "__main__":
     logZ = log_sum_exp_grid + np.log(dx*dy)
     print(f"Log Evidence (log Z): {logZ}")
 
-    dt = 0.5 #0.002
-    nit = 100
+    dt = 1. #0.002
+    nit = 150
     n_comp = 1
     sigma = 7.
     mu, sigma = [np.array([-9., 40.])], [np.diag([sigma**2, sigma**2])]
@@ -87,9 +88,11 @@ if __name__ == "__main__":
     plt.ylabel(r'$\Delta t_{W}$')
     plt.grid(True)
     plt.xlim([0, nit])
-    plt.savefig(path+'time_steps.pdf', dpi=300, bbox_inches='tight')
-    plt.close()
-    #plt.show()
+    if savefig == True:
+        plt.savefig(path+'time_steps.pdf', dpi=300, bbox_inches='tight')
+        plt.close()
+    else:
+        plt.show()
 
     plt.figure(figsize=(6, 2.25))
     plt.plot(kl_hist_id, color=colors['id'], label=labels['id'], lw=1.7)
@@ -101,10 +104,8 @@ if __name__ == "__main__":
     plt.grid(True)
     plt.xlim([0, nit])
     plt.legend()
-    #plt.savefig(path+'KL_div.pdf', dpi=300, bbox_inches='tight')
-    #
     plt.show()
-    plt.close()
+    #
 
     print("Recomputing True KL history...")
     true_kl_id = recompute_gmm_kl(means_id, Rs_id, ws_id, f, logZ)
@@ -121,9 +122,11 @@ if __name__ == "__main__":
     plt.grid(True)
     plt.xlim([0, nit])
     plt.legend()
-    #plt.show()
-    plt.savefig(path+'KL_mc.pdf', dpi=300, bbox_inches='tight')
-    plt.close()
+    if savefig == True:
+        plt.savefig(path+'KL_mc.pdf', dpi=300, bbox_inches='tight')
+        plt.close()
+    else:
+        plt.show()
 
     plot_optimization_trajectories(X, Y, logPOST,
         means_nat,          # Trajectory of means for 'natural' method (shape: [T, 2] or list)
@@ -134,6 +137,8 @@ if __name__ == "__main__":
         R_in,           # Initial R matrix/covariance factor for the initial state (shape: [2, 2])
         cmap="Blues"
     )
-    #plt.show()
-    plt.savefig(path+'Rosenbrock.pdf', dpi=300, bbox_inches='tight')
-    plt.close()
+    if savefig == True:
+        plt.savefig(path+'Rosenbrock.pdf', dpi=300, bbox_inches='tight')
+        plt.close()
+    else:
+        plt.show()

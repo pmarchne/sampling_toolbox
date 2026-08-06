@@ -22,7 +22,7 @@ def log_and_grad_post(x):
 
 from scipy.stats import multivariate_normal
 
-def recompute_gmm_kl(means_hist, Rs_hist, weights_hist, log_post_fn, logZ, n_samples=20000, seed=42):
+def recompute_gmm_kl(means_hist, Rs_hist, weights_hist, log_post_fn, logZ, n_samples=40000, seed=42):
     """
     Recomputes the true KL history using Monte Carlo sampling.
     """
@@ -92,7 +92,7 @@ def generate_grid_gmm_init():
     
     # Define the exact grid coordinates specified
     x_coords = [-4.0, 0.0, 4.0] #  [-4.0, 0.0, 4.0]
-    y_coords =  [-8.0, 50.0] # [-8.0, 40.0]
+    y_coords =  [-8.0, 50.0] # [-8.0, 40.0] #50.
     
     # Iterate systematically to generate 3 * 2 = 6 coordinates
     for y in y_coords:
@@ -102,7 +102,7 @@ def generate_grid_gmm_init():
             mu.append(mean_vector)
             
             # Spherical initial standard deviation
-            std_val = 1.5 #1.5
+            std_val = 2.#1.25 #1.5
             cov_matrix = np.diag([std_val**2, std_val**2])
             sigma.append(cov_matrix)
             
@@ -112,6 +112,7 @@ def generate_grid_gmm_init():
 
 
 if __name__ == "__main__":
+    savefig = False
     n_grid = 400
     xlim = 10.
     ylim = 15.
@@ -126,9 +127,9 @@ if __name__ == "__main__":
     logZ = log_sum_exp_grid + np.log(dx*dy)
     print(f"Log Evidence (log Z): {logZ}")
 
-    dt = 0.002
-    dtw = 0.01 #0.2 # 0.5 #0.01 # 0.01
-    nit = 300 # 400
+    dt = 0.01
+    dtw = 0.05 #0.2 # 0.5 #0.01 # 0.01
+    nit = 800 # 400
     n_comp = 6
     mu, sigma = generate_grid_gmm_init() #generate_random_gmm_init(n_components=n_comp, seed=12)
     mu_in = [m.copy() for m in mu]
@@ -137,29 +138,24 @@ if __name__ == "__main__":
 
     integrator ='heun_adaptive'
     integrator_fr = 'heun_adaptive'
-    precond = ['None', 'natural', 'hessian']
+    precond = ['None', 'natural']
     gvi_id = GaussianODE(log_and_grad_post, step_size=dt, n_iter=nit, time_scheme=integrator, time_scheme_fr=integrator_fr, precond=precond[0], step_size_w=dtw)
     gvi_nat = GaussianODE(log_and_grad_post, step_size=dt, n_iter=nit, time_scheme=integrator, time_scheme_fr=integrator_fr, precond=precond[1], step_size_w=dtw)
-    #gvi_hess = GaussianODE(log_and_grad_post, step_size=dt, n_iter=nit, time_scheme=integrator, time_scheme_fr=integrator_fr, precond=precond[2], step_size_w=dtw)
+    
     gvi_id.kl_track = GenericKLTracker(logZ)
     gvi_nat.kl_track = GenericKLTracker(logZ)
-    #gvi_hess.kl_track = GenericKLTracker(logZ)
 
     final_mean_id, final_R_id, final_ws_id, means_id, Rs_id, ws_id, kl_hist_id = gvi_id.sample([m.copy() for m in mu_in], [r.copy() for r in R])
     final_mean_nat, final_R_nat, final_ws_nat, means_nat, Rs_nat, ws_nat, kl_hist_nat = gvi_nat.sample([m.copy() for m in mu_in], [r.copy() for r in R])
-    #final_mean_hess, final_R_hess, final_ws_hess, means_hess, Rs_hess, ws_hess, kl_hist_hess = gvi_hess.sample([m.copy() for m in mu_in], [r.copy() for r in R])
 
     path = '/home/marchnep/Documents/Gitlab_repos/2026_MARCHNER_UQFWI/Fig/'
     colors = {
         'id': 'green',
         'nat': 'red',
-        'new': 'blue'
     }
-
     labels = {
         'id': r'Identity',
         'nat': r'Natural',
-        'new': r'Newton-like'
     }
     import matplotlib.pyplot as plt
     plt.rcParams.update({
@@ -178,7 +174,6 @@ if __name__ == "__main__":
     plt.figure(figsize=(6, 2.25))
     plt.plot(gvi_id.dt_history, color=colors['id'], label=labels['id'], lw=1.7)
     plt.plot(gvi_nat.dt_history, color=colors['nat'], label=labels['nat'], lw=1.7, linestyle='--')
-    #plt.plot(gvi_hess.dt_history, color=colors['new'], label=labels['new'], lw=1.7, linestyle='-.')
     plt.xlabel(r'Iteration')
     plt.ylabel(r'$\Delta t_{W}$')
     plt.grid(True)
@@ -190,7 +185,6 @@ if __name__ == "__main__":
     plt.figure()
     plt.plot(gvi_id.dt_fr_history, color=colors['id'], label=labels['id'], lw=1.7)
     plt.plot(gvi_nat.dt_fr_history, color=colors['nat'], label=labels['nat'], lw=1.7, linestyle='--')
-    #plt.plot(gvi_hess.dt_fr_history, color=colors['new'], label=labels['new'], lw=1.7, linestyle='-.')
     plt.title('step size FR')
     plt.legend()
     plt.show()
@@ -198,11 +192,9 @@ if __name__ == "__main__":
 
     estimated_KL_id = np.maximum(1e-4, np.asarray(kl_hist_id))
     estimated_KL_nat = np.maximum(1e-4, np.asarray(kl_hist_nat))
-    #estimated_KL_hess = np.maximum(1e-4, np.asarray(kl_hist_hess))
     plt.figure(figsize=(6, 2.25))
     plt.plot(estimated_KL_id, color=colors['id'], label=labels['id'], lw=1.7)
     plt.plot(estimated_KL_nat, color=colors['nat'], label=labels['nat'], lw=1.7, linestyle='--')
-    #plt.plot(estimated_KL_hess, color=colors['new'], label=labels['new'], lw=1.7, linestyle='-.')
     plt.xlabel(r'Iteration')
     plt.ylabel(r'KL$(\mu \parallel \pi)$')
     plt.yscale('log')
@@ -221,35 +213,31 @@ if __name__ == "__main__":
     print("Recomputing True KL history for Natural...")
     true_kl_nat = recompute_gmm_kl(means_nat, Rs_nat, ws_nat, f, logZ)
 
-    print("Recomputing True KL history for Newton...")
-    #true_kl_new = recompute_gmm_kl(means_hess, Rs_hess, ws_hess, f, logZ)
-
     # Plotting the corrected curves
     plt.figure(figsize=(6, 2.25))
     plt.plot(true_kl_id, color=colors['id'], label=labels['id'], lw=1.7)
     plt.plot(true_kl_nat, color=colors['nat'], label=labels['nat'], lw=1.7, linestyle='--')
-    #plt.plot(true_kl_new, color=colors['new'], label=labels['new'], lw=1.7, linestyle='-.')
     plt.xlabel(r'Iteration')
     plt.ylabel(r'KL$(\mu \parallel \pi)$')
     plt.yscale('log')
     plt.grid(True)
     plt.xlim([0, nit])
     plt.legend()
-    plt.savefig(path+'KL_mc_gmm.pdf', dpi=300, bbox_inches='tight')
-    plt.close()
-    #plt.show()
+    if savefig == True:
+        plt.savefig(path+'KL_mc_gmm.pdf', dpi=300, bbox_inches='tight')
+        plt.close()
+    else:
+        plt.show()
 
     plot_result_gmm(X, Y, logPOST, mus_hist=means_nat, Rs=final_R_nat, weights=final_ws_nat, method='Natural', mu0=mu_in)
-    plt.savefig(path+'Rosenbrock_gmm.pdf', dpi=300, bbox_inches='tight')
-    plt.close()
-    #plt.show()
+    if savefig == True:
+        plt.savefig(path+'Rosenbrock_gmm.pdf', dpi=300, bbox_inches='tight')
+        plt.close()
+    else:
+        plt.show()
     
     plot_result_gmm(X, Y, logPOST, mus_hist=means_id, Rs=final_R_id, weights=final_ws_id, method='Identity', mu0=mu_in)
     plt.show()
-    plt.close()
-
-    #plot_result_gmm(X, Y, logPOST, mus_hist=means_hess, Rs=final_R_hess, weights=final_ws_hess, method='Newton-like', mu0=mu_in)
-    #plt.show()
     #plt.close()
 
     plt.figure(figsize=(6, 2.25))
@@ -262,32 +250,8 @@ if __name__ == "__main__":
     plt.grid(True)
     plt.title('Natural')
     plt.xlim([0, nit])
-    plt.savefig(path+'weights_gmm.pdf', dpi=300, bbox_inches='tight')
-    plt.close()
-    #plt.show()
-
-    #plt.figure(figsize=(6, 2.25))
-    #weights_arr2 = np.array(ws_hess[1:])
-    #colors = plt.cm.Blues(np.linspace(0.2, 1, max(n_comp, 5)))
-    #for k in range(n_comp):
-    #    plt.plot(weights_arr2[:, k], color=colors[k], lw=2, label=f"Comp {k}")
-    #plt.xlabel(r'Iteration')
-    #plt.ylabel(r'$w_k$')
-    #plt.grid(True)
-    #plt.title('Newton')
-    #plt.xlim([0, nit])
-    #plt.show()
-    #plt.close()
-
-    plt.figure(figsize=(6, 2.25))
-    weights_arr3 = np.array(ws_id[1:])
-    colors = plt.cm.Greens(np.linspace(0.2, 1, max(n_comp, 5)))
-    for k in range(n_comp):
-        plt.plot(weights_arr3[:, k], color=colors[k], lw=2, label=f"Comp {k}")
-    plt.xlabel(r'Iteration')
-    plt.ylabel(r'$w_k$')
-    plt.grid(True)
-    plt.title('Identity')
-    plt.xlim([0, nit])
-    plt.show()
-    plt.close()
+    if savefig == True:
+        plt.savefig(path+'weights_gmm.pdf', dpi=300, bbox_inches='tight')
+        plt.close()
+    else:
+        plt.show()

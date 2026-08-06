@@ -130,8 +130,6 @@ def compute_increments_generic(means, Rs, logws, log_and_grad_post, mixture_grad
             M += 2.0 * Q
             
         A = R_inv @ M @ R_inv.T
-        #A = 0.05*A
-        # dR = R @ np.tril(R_inv @ M @ R_inv.T)
         Phi = np.tril(A, -1) + 0.5 * np.diag(np.diag(A))
         dR = R @ Phi
         dms.append(dm)
