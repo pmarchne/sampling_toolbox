@@ -1,6 +1,6 @@
 import numpy as np
 import matplotlib.pyplot as plt
-from plotting import plot_result_gmm, plot_vi_diagnostics
+from plotting import plot_result_gmm#, plot_vi_diagnostics
 from benchmarks_2D import (
     gauss2d_log, 
     gauss2d_grad_log, 
@@ -109,7 +109,7 @@ if __name__ == "__main__":
     
     # Global Solver Hyperparameters
     dt = 0.002
-    nit = 400
+    nit = 200
     integrator = 'heun_adaptive'
     
     for case in cases_to_test:
@@ -134,7 +134,7 @@ if __name__ == "__main__":
         
         # 5. Execute Trajectories using distinct copies of input components
         print("Running Identity Flow...")
-        final_m_id, final_R_id, final_ws_id, m_hist_id, R_hist_id, _, kl_hist_id = gvi_id.sample(
+        final_m_id, final_R_id, final_ws_id, m_hist_id, R_hist_id, w_hist_id, kl_hist_id = gvi_id.sample(
             [m.copy() for m in mu_in], [r.copy() for r in R_in]
         )
         
@@ -157,10 +157,10 @@ if __name__ == "__main__":
         plt.legend()
         plt.grid(True, which="both", ls="--", alpha=0.5)
         plt.show()
-        
+
         # Spatial Contour Overlays
-        plot_result_gmm(X, Y, logPOST, mus_hist=m_hist_nat, Rs=final_R_id, weights=final_ws_id, method=f'Case {case} - Identity', mu0=mu_in)
-        plot_result_gmm(X, Y, logPOST, mus_hist=m_hist_id, Rs=final_R_nat, weights=final_ws_nat, method=f'Case {case} - Natural', mu0=mu_in)
+        plot_result_gmm(X, Y, logPOST, mus_hist=m_hist_id, Rs=final_R_id, weights=final_ws_id, method=f'Case {case} - Identity', mu0=mu_in)
+        plot_result_gmm(X, Y, logPOST, mus_hist=m_hist_nat, Rs=final_R_nat, weights=final_ws_nat, method=f'Case {case} - Natural', mu0=mu_in)
         
         # 1. Compute full histories post-optimization
         kl_hist_id, tv_hist_id = compute_trajectory_metrics(X, Y, logPOST, m_hist_id, R_hist_id)
@@ -176,5 +176,5 @@ if __name__ == "__main__":
         final_mu = m_hist_id[-1]
         final_R = R_hist_id[-1]
 
-        if case > 1:
-            plot_vi_diagnostics(m_hist_nat[1:], R_hist_nat[1:], w_hist_nat[1:], kl_hist_nat)
+        #if case > 1:
+         #   plot_vi_diagnostics(m_hist_nat[1:], R_hist_nat[1:], w_hist_nat[1:], kl_hist_nat)

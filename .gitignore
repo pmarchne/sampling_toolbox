@@ -1,7 +1,7 @@
 *.egg-info/
 sampling_toolbox/__pycache__/
-sampling_toolbox/tests/__pycache__/
+tests/__pycache__/
 sampling_toolbox/utilities/__pycache__/
-sampling_toolbox/examples/__pycache__/
+examples/__pycache__/
 .vscode/
 .venv/

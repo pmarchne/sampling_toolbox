@@ -334,7 +334,7 @@ def plot_result_gmm(
     # Top Marginal Plot (x1)
     # ---------------------------------------------------------
     ax_top.plot(x_vals, px_true, lw=2, label="true")
-    ax_top.plot(x_vals, px_gmm, lw=2, ls="--", label="Natural", color='red')
+    ax_top.plot(x_vals, px_gmm, lw=2, ls="--", label=method, color='red')
 
     ax_top.set_xlim(x_vals.min(), x_vals.max())
     ax_top.set_ylabel(r"$\pi(x_1)$")
@@ -351,7 +351,7 @@ def plot_result_gmm(
     ax_right.set_xlabel(r"$\pi(x_2)$")
     ax_right.tick_params(axis="y", labelleft=False)
 
-    #plt.show()
+    plt.show()
 
 def plot_optimization_trajectories(
     X,

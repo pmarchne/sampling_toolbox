@@ -12,6 +12,11 @@ dependencies = [
     "tabulate",
 ]
 
+[project.optional-dependencies]
+dev = [
+    "pytest",
+]
+
 [tool.setuptools.packages.find]
 where = ["."]
 include = ["sampling_toolbox*"]
