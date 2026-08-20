@@ -5,8 +5,7 @@ from sampling_toolbox.utilities.gauss_vi_tools import compute_increments_generic
 from sampling_toolbox.utilities.time_integration import (
     euler_step_pos, euler_step_w, heun_adaptive_step_pos, rmsprop_step_pos
 )
-from sampling_toolbox.utilities.kl_tracker import GenericKLTracker
-from sampling_toolbox.utilities.birth_death import apply_birth_death
+from sampling_toolbox.utilities.kl_tracker import RelativeKLTracker
 from sampling_toolbox.utilities.gauss_vi_tools import mixture_grad
 
 
@@ -30,7 +29,7 @@ class GaussianODE(VI):
         self.precond = precond
         self.step_size_w = step_size_w
         self.cumulative_dist = 0.0
-        self.kl_track = GenericKLTracker(0.)
+        self.kl_track = RelativeKLTracker(0.)
         self.ess_target = ess_target
         
         # Diagnostics
@@ -46,7 +45,6 @@ class GaussianODE(VI):
         self.lambda_end = 1e-3
         self.lambda_start = 1e3
         self.lambda_history = []
-
         # RMSprop specific hyperparameters
         self.alpha_rmsprop = 0.9
         self.eps_rmsprop = 1e-8
@@ -65,8 +63,6 @@ class GaussianODE(VI):
         reg_lambda=self.reg_lambda
         )
         if not np.isfinite(dm).all() or not np.isfinite(dR).all():
-            print(dm)
-            print(dR)
             raise ValueError("Non-finite increments computed.")
             
         if update_cache:
@@ -79,7 +75,6 @@ class GaussianODE(VI):
         """Reuses cached log evaluations directly from the position pass."""
         if self._last_logs is None:
             raise RuntimeError("Weight increments requested, but no spatial cache exists.")
-            
         dlogws = compute_weight_increments(
             means=mu,
             Rs=R,
@@ -89,7 +84,7 @@ class GaussianODE(VI):
         return dlogws
 
 
-    def _advance_weights(self, mu, R, logws, dt_pos, it):
+    def _advance_weights(self, mu, R, logws, dt_pos):
         """
         Advances weights using a staggered WFR approach. Uses the accepted 
         spatial step (dt_pos) as a dynamic baseline to scale weight updates.
@@ -102,7 +97,6 @@ class GaussianODE(VI):
         if self.time_scheme_fr == 'euler':
             effective_dt_w = dt_pos * self.step_size_w
             return euler_step_w(mu, R, logws, self._get_w_increments, effective_dt_w)
-
         # 2. Staggered WFR Adaptive Branch
         elif self.time_scheme_fr == 'heun_adaptive':
             # Extract expectations and compute component weights
@@ -110,15 +104,12 @@ class GaussianODE(VI):
             ws = np.exp(logws)
             mean_E = np.sum(ws * Es)
             fr_variance = np.sum(ws * (Es - mean_E)**2)
-            fr_speed = np.sqrt(fr_variance)
             delta_max = getattr(self, 'delta_max', 0.02)
-            adaptive_dt_w = min(0.1, delta_max / (fr_speed + 1e-3))
-            max_weight_dt = adaptive_dt_w # min(dt_pos, adaptive_dt_w)
-            unc_logws = logws - max_weight_dt * Es
+            adaptive_dt_w = min(0.1, delta_max / (np.sqrt(fr_variance) + 1e-3))
+            unc_logws = logws - adaptive_dt_w * Es
             new_logws = unc_logws - logsumexp(unc_logws)
-            self.dt_fr_history.append(max_weight_dt)
+            self.dt_fr_history.append(adaptive_dt_w)
             return new_logws
-
         else:
             raise ValueError(f"Scheme '{self.time_scheme_fr}' not implemented for weights.")
 
@@ -187,7 +178,6 @@ class GaussianODE(VI):
         weights_hist = [np.exp(logws).copy()]
         current_w = weights_hist[0]
         kl_hist = []
-        n_mutations = 0
 
         evolve_weights = (K > 1) and (self.step_size_w > 0.0)
         rejected_steps_count = 0
@@ -197,7 +187,6 @@ class GaussianODE(VI):
 
         while i <= self.n_iter:
             
-                
             saved_cub_pts = self._last_cub_points
             saved_logs = self._last_logs
             mu_next, R_next, accepted, dt_new = self._advance_pos(mu, R, logws, i)
@@ -207,7 +196,7 @@ class GaussianODE(VI):
                 # Shrink step size aggressively
                 self.step_size = self.step_size * 0.05
                 nan_count += 1
-                # Revert to last step's healthy parameters (do NOT advance i)
+                # Revert to last step's healthy parameters
                 if nan_count > self.max_nan:
                     raise RuntimeError("Solver failed: Too many rejected steps due to NaN loops.")
                 continue
@@ -216,7 +205,7 @@ class GaussianODE(VI):
                 dt_actual = dt_new
                 
                 if evolve_weights:
-                    logws_next = self._advance_weights(mu, R, logws, dt_actual, i)
+                    logws_next = self._advance_weights(mu, R, logws, dt_actual)
                     current_w = np.exp(logws_next).copy()
                     logws = logws_next
                 
@@ -232,21 +221,13 @@ class GaussianODE(VI):
                         cubature_points=self._last_cub_points,
                         cubature_weights=cub_weights,
                         cached_log_p=self._last_logs,
-                        mu=mu, 
-                        R=R, 
+                        mu=mu,
+                        R=R,
                         weights=current_w
                     )
                     kl_hist.append(current_kl)
 
                 mu, R = mu_next, R_next
-                #mu_next, R_next, logws, did_mutate = apply_birth_death(
-                #    mu_next, R_next, logws, self.log_and_grad_post, threshold=0.01, rng=self.rng
-                #)
-                # current_w = np.exp(logws).copy()
-                #if did_mutate:
-                #    n_mutations += 1
-                #    self.step_size = dt_actual / 2.0
-                #    print(f" [Step Update] Birth-death triggered. Shrinking step size to: {self.step_size:.6f}")
                 
                 self.lambda_history.append(self.reg_lambda)
                 means_hist.append([m.copy() for m in mu])
@@ -258,31 +239,14 @@ class GaussianODE(VI):
                     kl_val = kl_hist[-1] if kl_hist else 0.0
                     print(f"Iter {i:3d} | dt: {dt_new:.4f} | KL: {kl_val:.4f}")
                     print(f"weights {current_w}")
-                    '''cov0 = R[0] @ R[0].T
-                    std0 = np.sqrt(np.diag(cov0))
-                    if K > 1:
-                        cov1 = R[1] @ R[1].T
-                        std1 = np.sqrt(np.diag(cov1))
-                        cov2 = R[2] @ R[2].T
-                        std2 = np.sqrt(np.diag(cov2))
-                        print('------------')
-                        print(f"weights {current_w}")
-                        print(f"mean 0 {mu[0]}")
-                        print(f"std 0 {std0}")
-                        print(f"mean 1 {mu[1]}")
-                        print(f"std 1 {std1}")
-                        print(f"mean 2 {mu[2]}")
-                        print(f"std 2 {std2}")'''
                 i += 1
             else:
                 self._last_cub_points = saved_cub_pts
                 self._last_logs = saved_logs
                 rejected_steps_count += 1
-                #if early_stopper.update(None, step_accepted=False):
-                #    break
                 if rejected_steps_count > self.max_rejections:
                     raise RuntimeError("Solver failed: Too many rejected steps.")
     
         print("Number of rejected steps = ", rejected_steps_count)
-        print("Number of mutations = ", n_mutations)
+        print("Number of nans = ", nan_count)
         return mu, R, np.exp(logws), means_hist, Rs_hist, weights_hist, kl_hist

@@ -2,7 +2,7 @@ import numpy as np
 from plotting import plot_optimization_trajectories, set_up_plots
 from benchmarks_2D import rosenbrock2d_log, rosenbrock2d_grad_log
 from sampling_toolbox.gauss_vi import GaussianODE
-from sampling_toolbox.utilities.kl_tracker import GenericKLTracker
+from sampling_toolbox.utilities.kl_tracker import RelativeKLTracker
 from benchmark_rosenbrock import recompute_gmm_kl
 
 def log_prior(x):
@@ -22,7 +22,7 @@ def log_and_grad_post(x):
 
 if __name__ == "__main__":
     set_up_plots()
-    savefig = True
+    savefig = False
     n_grid = 400
     xlim = 10
     ylim = 15
@@ -57,15 +57,15 @@ if __name__ == "__main__":
     gvi_hess = GaussianODE(log_and_grad_post, step_size=dt, n_iter=nit, time_scheme=integrator, precond=precond[2], step_size_w=dtw)
     gvi_hess.lambda_start = 1e-6
     gvi_hess.lambda_end = 1e-6
-    gvi_id.kl_track = GenericKLTracker(logZ)
-    gvi_nat.kl_track = GenericKLTracker(logZ)
-    gvi_hess.kl_track = GenericKLTracker(logZ)
+    gvi_id.kl_track = RelativeKLTracker(logZ)
+    gvi_nat.kl_track = RelativeKLTracker(logZ)
+    gvi_hess.kl_track = RelativeKLTracker(logZ)
 
     final_mean_id, final_R_id, final_ws_id, means_id, Rs_id, ws_id, kl_hist_id = gvi_id.sample([m.copy() for m in mu_in], [r.copy() for r in R])
     final_mean_nat, final_R_nat, final_ws_nat, means_nat, Rs_nat, ws_nat, kl_hist_nat = gvi_nat.sample([m.copy() for m in mu_in], [r.copy() for r in R])
     final_mean_hess, final_R_hess, final_ws_hess, means, Rs, ws, kl_hist_hess = gvi_hess.sample([m.copy() for m in mu_in], [r.copy() for r in R])
 
-    path = '/home/marchnep/Documents/Gitlab_repos/2026_MARCHNER_UQFWI/Fig/'
+    path = ''
     colors = {
         'id': 'green',
         'nat': 'red',

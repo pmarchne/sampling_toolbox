@@ -1,66 +1,53 @@
 import numpy as np
 from sampling_toolbox.base import ParticleMethod
-from sampling_toolbox.utilities.kl_tracker import GenericKLTracker
+from sampling_toolbox.utilities.kl_tracker import RelativeKLTracker
+
 
 class ULA(ParticleMethod):
-    """
-    Unadjusted Langevin Algorithm (ULA) with optional preconditioning.
-
-    Dynamics:
-        x_{k+1} = x_k
-                  + step_size * ( Q(x_k) grad log pi(x_k)
-                                  + div Q(x_k) )
-                  + sqrt(2 * step_size * Q(x_k)) * xi_k
-
-    Parameters
-    ----------
-    preconditioner : callable, optional
-        Function Q(x) returning a (d,d) SPD matrix.
-        If None, Q(x)=I.
-
-    div_preconditioner : callable, optional
-        Function returning divergence of Q:
-            div Q(x) in R^d
-        If None, assumed zero.
-    """
+    """Unadjusted Langevin Algorithm (ULA) with optional preconditioning."""
 
     def __init__(
         self,
-        log_likelihood,
-        log_prior,
-        grad_log_likelihood,
-        grad_log_prior,
+        log_likelihood=None,
+        log_prior=None,
+        grad_log_likelihood=None,
+        grad_log_prior=None,
+        log_and_grad_post=None,
         step_size=1e-2,
         n_iter=1000,
         rng=None,
+        verbose=False,
         preconditioner=None,
         div_preconditioner=None,
     ):
-
         super().__init__(
             log_likelihood,
             log_prior,
             grad_log_likelihood,
             grad_log_prior,
+            log_and_grad_post,
             step_size,
             rng=rng,
         )
+        self.step_size = step_size
         self.n_iter = n_iter
         self.precond = preconditioner
         self.div_precond = div_preconditioner
-        self.kl_track = GenericKLTracker(0.)
-        self.fd_precond = None
-            
+        self.kl_track = RelativeKLTracker(0.0)
+        self.verbose = verbose
+        self.diagnostics = {
+            "kl": [],
+        }
 
     def _Q(self, x):
         if self.precond is None:
-            return np.eye(len(x) if x is not None else 2)
+            return np.eye(len(x))
         elif callable(self.precond):
             return self.precond(x)
         elif isinstance(self.precond, np.ndarray):
             return self.precond
         else:
-            raise ValueError('Preconditioner type or value unknown!')
+            raise ValueError("Preconditioner type or value unknown!")
 
     def _div_Q(self, x):
         if self.div_precond is None:
@@ -69,47 +56,75 @@ class ULA(ParticleMethod):
             return self.div_precond(x)
         elif isinstance(self.precond, np.ndarray):
             return np.zeros_like(x)
-            
         else:
-            raise ValueError('div Q preconditioner unknown or unhandled!')
+            raise ValueError("div Q preconditioner unknown or unhandled!")
 
-    # Main sampler
-    def _sample(self, x0: np.ndarray, num_samples=None, save_step=1, print_step=500):
-        particles = np.asarray(x0).copy()
+    def _langevin_update(self, particles):
         n, dim = particles.shape
-        samples_history = [particles.copy()]
-        kl_hist = []
+        grad = np.zeros((n, dim))
+        logp = np.zeros(n)
+        drift = np.zeros((n, dim))
+        noise = np.zeros((n, dim))
 
-        for k in range(self.n_iter):
-            drift_all = np.zeros_like(particles)
-            noise_all = np.zeros_like(particles)
-            xi_all = self.rng.normal(size=particles.shape)
+        xi_all = self.rng.normal(size=particles.shape)
 
+        # Single pass for target density evaluation + gradient computation
+        if self.log_and_grad_post is not None:
             for p in range(n):
-                x_p = particles[p, :]
-                grad_p = self.grad_log_posterior(x_p)
-                # get preconditioner
-                Q_p = self._Q(x_p)                   
-                divQ_p = self._div_Q(x_p)   
-                
-                if divQ_p.shape != x_p.shape:
-                    raise ValueError(f"div_preconditioner shape mismatch.")          
-                try:
-                    chol_Q_p = np.linalg.cholesky(Q_p)
-                except np.linalg.LinAlgError:
-                    raise ValueError("Preconditioner matrix is not SPD!")
-                
-                drift_all[p, :] = Q_p @ grad_p + divQ_p
-                noise_all[p, :] = np.sqrt(2.0 * self.step_size) * (chol_Q_p @ xi_all[p, :])
+                logp[p], grad[p] = self.log_and_grad_posterior(particles[p])
+        else:
+            for p in range(n):
+                grad[p] = self.grad_log_posterior(particles[p])
+                logp[p] = self.log_posterior(particles[p])
 
-            particles += self.step_size * drift_all + noise_all
+        # Preconditioned drift and stochastic noise computation
+        for p in range(n):
+            x_p = particles[p]
+            Q_p = self._Q(x_p)
+            divQ_p = self._div_Q(x_p)
 
-            if self.kl_track:
-                log_p_values = [self.log_posterior(particles[p, :]) for p in range(n)]
-                current_kl = self.kl_track.estimate_kl_particles(particles, log_p_values)
-                kl_hist.append(current_kl)
-            if k % save_step == 0:
-                samples_history.append(particles.copy())
-            if k % print_step == 0:
-                print(f"Iteration {k+1:5d} complete.")
-        return particles, samples_history, kl_hist
+            if divQ_p.shape != x_p.shape:
+                raise ValueError("div_preconditioner shape mismatch.")
+
+            try:
+                chol_Q_p = np.linalg.cholesky(Q_p)
+            except np.linalg.LinAlgError:
+                raise ValueError("Preconditioner matrix is not SPD!")
+
+            drift[p] = Q_p @ grad[p] + divQ_p
+            noise[p] = np.sqrt(2.0 * self.step_size) * (chol_Q_p @ xi_all[p])
+
+        return drift, noise, logp
+
+    def _sample(self, x0: np.ndarray):
+        # x0 shape should be (num_particles, dim)
+        particles = np.asarray(x0).copy()
+        samples_history = [particles.copy()]
+
+        for i in range(self.n_iter):
+            old_particles = particles.copy()
+            drift, noise, log_p_values = self._langevin_update(particles)
+
+            # Update particle states
+            particles += self.step_size * drift + noise
+
+            if not np.all(np.isfinite(particles)):
+                raise FloatingPointError(
+                    "ULA particles diverged: non-finite values detected."
+                )
+
+            # Track KL divergence before applying the step
+            kl_before_update = self.kl_track.estimate_kl_particles(
+                old_particles, log_p_values
+            )
+            self.diagnostics["kl"].append(kl_before_update)
+            samples_history.append(particles.copy())
+
+            if self.verbose:
+                print(
+                    f"Iter {i+1:5d} | "
+                    f"drift_norm={np.linalg.norm(drift)/particles.shape[0]:.3e} | "
+                    f"KL={kl_before_update:.3e}"
+                )
+
+        return particles, samples_history, self.diagnostics

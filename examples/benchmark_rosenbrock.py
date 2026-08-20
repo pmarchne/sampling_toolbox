@@ -3,7 +3,7 @@ import numpy as np
 from plotting import plot_result_gmm
 from benchmarks_2D import rosenbrock2d_log, rosenbrock2d_grad_log
 from sampling_toolbox.gauss_vi import GaussianODE
-from sampling_toolbox.utilities.kl_tracker import GenericKLTracker
+from sampling_toolbox.utilities.kl_tracker import RelativeKLTracker
 
 def log_prior(x):
     return 0.0
@@ -129,7 +129,7 @@ if __name__ == "__main__":
 
     dt = 0.01
     dtw = 0.05 #0.2 # 0.5 #0.01 # 0.01
-    nit = 800 # 400
+    nit = 200 # 400
     n_comp = 6
     mu, sigma = generate_grid_gmm_init() #generate_random_gmm_init(n_components=n_comp, seed=12)
     mu_in = [m.copy() for m in mu]
@@ -142,13 +142,13 @@ if __name__ == "__main__":
     gvi_id = GaussianODE(log_and_grad_post, step_size=dt, n_iter=nit, time_scheme=integrator, time_scheme_fr=integrator_fr, precond=precond[0], step_size_w=dtw)
     gvi_nat = GaussianODE(log_and_grad_post, step_size=dt, n_iter=nit, time_scheme=integrator, time_scheme_fr=integrator_fr, precond=precond[1], step_size_w=dtw)
     
-    gvi_id.kl_track = GenericKLTracker(logZ)
-    gvi_nat.kl_track = GenericKLTracker(logZ)
+    gvi_id.kl_track = RelativeKLTracker(logZ)
+    gvi_nat.kl_track = RelativeKLTracker(logZ)
 
     final_mean_id, final_R_id, final_ws_id, means_id, Rs_id, ws_id, kl_hist_id = gvi_id.sample([m.copy() for m in mu_in], [r.copy() for r in R])
     final_mean_nat, final_R_nat, final_ws_nat, means_nat, Rs_nat, ws_nat, kl_hist_nat = gvi_nat.sample([m.copy() for m in mu_in], [r.copy() for r in R])
 
-    path = '/home/marchnep/Documents/Gitlab_repos/2026_MARCHNER_UQFWI/Fig/'
+    path = ''
     colors = {
         'id': 'green',
         'nat': 'red',

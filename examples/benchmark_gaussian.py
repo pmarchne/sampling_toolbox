@@ -7,9 +7,9 @@ from benchmarks_2D import (
     four_mode2D_asymmetric_log, 
     four_mode2D_asymmetric_grad_log
 )
-from scipy.stats import multivariate_normal, norm
+from scipy.stats import multivariate_normal
 from sampling_toolbox.gauss_vi import GaussianODE
-from sampling_toolbox.utilities.kl_tracker import GenericKLTracker
+from sampling_toolbox.utilities.kl_tracker import RelativeKLTracker
 
 def compute_trajectory_metrics(X, Y, logPOST, m_hist, R_hist):
     """
@@ -129,8 +129,8 @@ if __name__ == "__main__":
         gvi_id = GaussianODE(log_and_grad_post, step_size=dt, n_iter=nit, time_scheme=integrator, time_scheme_fr=integrator, precond='identity', step_size_w=dtw_val)
         gvi_nat = GaussianODE(log_and_grad_post, step_size=dt, n_iter=nit, time_scheme=integrator, time_scheme_fr=integrator, precond='natural', step_size_w=dtw_val)
         
-        gvi_id.kl_track = GenericKLTracker(logZ)
-        gvi_nat.kl_track = GenericKLTracker(logZ)
+        gvi_id.kl_track = RelativeKLTracker(logZ)
+        gvi_nat.kl_track = RelativeKLTracker(logZ)
         
         # 5. Execute Trajectories using distinct copies of input components
         print("Running Identity Flow...")

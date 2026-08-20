@@ -8,8 +8,8 @@ from scipy.stats import norm
 
 def set_up_plots():
       plt.rcParams.update({
-        "font.family": "serif",       # Classic publication serif style
-        "text.usetex": True,         # Set to True if your system has a full local LaTeX installation
+        "font.family": "serif",
+        "text.usetex": True,
         "font.size": 14,
         "axes.labelsize": 16,
         "axes.titlesize": 16,
@@ -20,30 +20,20 @@ def set_up_plots():
         "grid.linestyle": "--"
     })
       
-    
-def plot_kl(kl_tracks, method_name):
-    plt.figure()
-    plt.plot(kl_tracks[method_name], label=f'{method_name.upper()} KL Divergence')
-    plt.xlabel('Iteration')
-    plt.ylabel('KL')
-    plt.legend()
-    plt.show()
 
 def plot_result(
     X,
     Y,
     logPOST,
     particles,
-    vp_ref=None,
+    initial_particles=None,
     cmap="Blues",
     method="svgd"
 ):
-
-    # True posterior (grid)
     POST = np.exp(logPOST - np.max(logPOST))
     Z = np.sum(POST)
     if Z == 0 or not np.isfinite(Z):
-        raise ValueError("Posterior normalization failed (underflow). Reduce grid range or scale log density.")
+        raise ValueError("Posterior normalization failed (underflow).")
     POST /= Z
 
     x_vals = X[0, :]
@@ -51,16 +41,11 @@ def plot_result(
     dx = x_vals[1] - x_vals[0]
     dy = y_vals[1] - y_vals[0]
 
-    # ---------------------------------------------------------
-    # Marginals (true from grid)
-    # ---------------------------------------------------------
     py_true = np.sum(POST, axis=1) * dy
     px_true = np.sum(POST, axis=0) * dx
-
     px_true /= np.max(px_true)
     py_true /= np.max(py_true)
 
-    # marginals
     kde_x = gaussian_kde(particles[:, 0])
     x_grid = np.linspace(x_vals.min(), x_vals.max(), 300)
     px_svgd = kde_x(x_grid)
@@ -71,11 +56,7 @@ def plot_result(
     py_svgd = kde_y(y_grid)
     py_svgd /= py_svgd.max()
 
-    # ---------------------------------------------------------
-    # Layout
-    # ---------------------------------------------------------
     fig = plt.figure(figsize=(8, 6))
-
     gs = GridSpec(
         2, 2,
         width_ratios=[4, 1],
@@ -88,46 +69,31 @@ def plot_result(
     ax_main = fig.add_subplot(gs[1, 0])
     ax_right = fig.add_subplot(gs[1, 1])
 
-    # ---------------------------------------------------------
-    # 2D posterior
-    # ---------------------------------------------------------
-    cf = ax_main.contourf(
-        X, Y, POST,
-        levels=20,
-        cmap=cmap,
-        alpha=0.9,
-    )
+    ax_main.contourf(X, Y, POST, levels=20, cmap=cmap, alpha=0.9)
+    ax_main.contour(X, Y, POST, levels=20, colors="k", linewidths=0.5, alpha=0.4)
 
-    ax_main.contour(
-        X, Y, POST,
-        levels=20,
-        colors="k",
-        linewidths=0.5,
-        alpha=0.4,
-    )
+    # Initial particles in black with transparency
+    if initial_particles is not None:
+        ax_main.scatter(
+            initial_particles[:, 0],
+            initial_particles[:, 1],
+            s=10,
+            color="black",
+            alpha=0.25,
+            label="Initial",
+            zorder=3,
+        )
 
-    # SVGD particles
+    # Final method particles
     ax_main.scatter(
         particles[:, 0],
         particles[:, 1],
         s=12,
         color="red",
-        alpha=0.4,
+        alpha=0.5,
         label=method,
+        zorder=4,
     )
-
-    # reference point (optional)
-    if vp_ref is not None:
-        ax_main.scatter(
-            vp_ref[0],
-            vp_ref[1],
-            s=120,
-            c="yellow",
-            marker="*",
-            edgecolors="k",
-            zorder=10,
-            label="reference",
-        )
 
     ax_main.set_xlabel(r"$x_1$")
     ax_main.set_ylabel(r"$x_2$")
@@ -135,38 +101,20 @@ def plot_result(
 
     ax_top.plot(x_vals, px_true, lw=2, label="true")
     ax_top.plot(x_grid, px_svgd, lw=2, ls="--", label=method, color='red')
-
-    if vp_ref is not None:
-        ax_top.axvline(vp_ref[0], color="black", ls="-.", alpha=0.6)
-
     ax_top.set_xlim(x_vals.min(), x_vals.max())
     ax_top.set_ylabel(r"$p(x_1)$")
     ax_top.tick_params(axis="x", labelbottom=False)
     ax_top.legend()
 
-    # ---------------------------------------------------------
-    # Right marginal (x2)
-    # ---------------------------------------------------------
     ax_right.plot(py_true, y_vals, lw=2, label="true")
     ax_right.plot(py_svgd, y_grid, lw=2, ls="--", label=method, color='red')
-
-    if vp_ref is not None:
-        ax_right.axhline(vp_ref[1], color="black", ls="-.", alpha=0.6)
-
     ax_right.set_ylim(y_vals.min(), y_vals.max())
     ax_right.set_xlabel(r"$p(x_2)$")
     ax_right.tick_params(axis="y", labelleft=False)
     ax_right.legend()
 
-    #fig.colorbar(cf, ax=ax_main, fraction=0.046)
     plt.show()
 
-
-import numpy as np
-import matplotlib.pyplot as plt
-from matplotlib.gridspec import GridSpec
-from matplotlib.patches import Ellipse
-from scipy.stats import norm
 
 def plot_result_gmm(
     X,
@@ -353,6 +301,7 @@ def plot_result_gmm(
 
     plt.show()
 
+
 def plot_optimization_trajectories(
     X,
     Y,
@@ -499,6 +448,3 @@ def plot_optimization_trajectories(
     ax_right.set_ylim(y_vals.min(), y_vals.max())
     ax_right.set_xlabel(r"$\pi(x_2)$")
     ax_right.tick_params(axis="y", labelleft=False)
-
-    
-    

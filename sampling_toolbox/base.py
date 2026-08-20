@@ -22,14 +22,15 @@ class ParticleMethod(ABC):
     rng : numpy.random.Generator, optional
         Random number generator for reproducibility.
     '''
-    def __init__(self, log_likelihood, log_prior,
+    def __init__(self, log_likelihood=None, log_prior=None,
                  grad_log_likelihood=None, grad_log_prior=None,
+                 log_and_grad_post=None,
                  step_size=1e-1, rng=None):
         self.log_likelihood = log_likelihood
         self.log_prior      = log_prior
         self.grad_log_likelihood = grad_log_likelihood
         self.grad_log_prior      = grad_log_prior
-        self.log_and_grad_log_post = None
+        self.log_and_grad_post = log_and_grad_post
         self.step_size = step_size
         self.rng = rng or np.random.default_rng()
 
@@ -50,26 +51,28 @@ class ParticleMethod(ABC):
         self.grad_calls += 1
         return self.grad_log_likelihood(x) + self.grad_log_prior(x)
     
-    def log_and_grad_log_posterior(self, x):
+    def log_and_grad_posterior(self, x):
         """
-        Executes the physics forward pass once.
-        Returns both the scalar log-posterior and its gradient vector.
+        Evaluate log pi(x) and grad log pi(x) simultaneously
         """
+        if self.log_and_grad_post is None:
+            raise NotImplementedError("log_and_grad_post was not provided.")
+        self.log_calls += 1
         self.grad_calls += 1
-        return self.log_and_grad_log_post(x)
+        return self.log_and_grad_post(x)
 
     @abstractmethod
-    def _sample(self, x0: np.ndarray, num_samples: int):
+    def _sample(self, x0: np.ndarray):
         pass
 
-    def sample(self, x0, num_samples, burn_in=0):
+    def sample(self, x0):
         ''' run the chain and record timing '''
         start = time.time()
-        chain = self._sample(np.asarray(x0), num_samples+burn_in)
+        samples, history, diagnostics = self._sample(np.asarray(x0))
         elapsed = time.time() - start
         self.last_sample_time = elapsed
         print(f"Sampling completed in {elapsed:.3f} seconds.")
-        return chain[burn_in:]
+        return samples, history, diagnostics
     
     def report_calls(self):
         ''' report number of function calls '''
@@ -126,18 +129,3 @@ class ParticleMethod(ABC):
             tau = 1 + 2 * np.sum(positive_ac[:max_lag])
             ess[i] = n / tau
         return ess
-
-    def mean_square_jump_distance(self, samples):
-        '''
-        Compute the Mean Square Jump Distance (MSJD) per parameter.
-
-        MSJD for parameter i = (1/(N-1)) * sum_{t=1 to N-1} (sample[t,i] - sample[t-1,i])^2
-        '''
-        samples = np.asarray(samples)
-        # differences between successive samples
-        diffs = samples[1:] - samples[:-1]
-        # squared differences per parameter
-        sq_diffs = diffs**2
-        # average over time dimension
-        msjd = np.mean(sq_diffs, axis=0)
-        return msjd
